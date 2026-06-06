@@ -1,0 +1,134 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Account {
+  id                 String        @id @default(cuid())
+  plaidAccountId     String?       @unique
+  plaidItemId        String?
+  name               String
+  officialName       String?
+  type               String
+  subtype            String?
+  mask               String?
+  currentBalance     Float         @default(0)
+  availableBalance   Float?
+  isoCurrencyCode    String?
+  isGoalAccount      Boolean       @default(false)
+  createdAt          DateTime      @default(now())
+  updatedAt          DateTime      @updatedAt
+  transactions       Transaction[]
+  goals              SavingsGoal[]
+}
+
+model BudgetGroup {
+  id         String           @id @default(cuid())
+  name       String
+  color      String
+  order      Int              @default(0)
+  expanded   Boolean          @default(true)
+  categories BudgetCategory[]
+  createdAt  DateTime         @default(now())
+  updatedAt  DateTime         @updatedAt
+}
+
+model BudgetCategory {
+  id           String             @id @default(cuid())
+  groupId      String
+  name         String
+  icon         String
+  monthlyLimit Float              @default(0)
+  order        Int                @default(0)
+  group        BudgetGroup        @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  transactions Transaction[]
+  splits       TransactionSplit[]
+  rules        MerchantRule[]
+  recurrences  RecurringCharge[]
+  createdAt    DateTime           @default(now())
+  updatedAt    DateTime           @updatedAt
+}
+
+model Transaction {
+  id                  String             @id @default(cuid())
+  plaidTransactionId  String?            @unique
+  accountId           String
+  categoryId          String?
+  date                DateTime
+  name                String
+  merchantName        String?
+  amount              Float
+  isoCurrencyCode     String?
+  reviewed            Boolean            @default(false)
+  excluded            Boolean            @default(false)
+  internalTransfer    Boolean            @default(false)
+  pending             Boolean            @default(false)
+  note                String?
+  account             Account            @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  category            BudgetCategory?    @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  splits              TransactionSplit[]
+  createdAt           DateTime           @default(now())
+  updatedAt           DateTime           @updatedAt
+}
+
+model TransactionSplit {
+  id            String         @id @default(cuid())
+  transactionId String
+  categoryId    String
+  amount        Float
+  transaction   Transaction    @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  category      BudgetCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+}
+
+model MerchantRule {
+  id         String         @id @default(cuid())
+  pattern    String
+  matchType  String
+  categoryId String
+  enabled    Boolean        @default(true)
+  category   BudgetCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  createdAt  DateTime       @default(now())
+  updatedAt  DateTime       @updatedAt
+}
+
+model RecurringCharge {
+  id         String          @id @default(cuid())
+  merchant   String
+  cadence    String
+  nextDate   DateTime
+  amount     Float
+  categoryId String?
+  category   BudgetCategory? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  createdAt  DateTime        @default(now())
+  updatedAt  DateTime        @updatedAt
+}
+
+model SavingsGoal {
+  id            String   @id @default(cuid())
+  name          String
+  icon          String
+  targetAmount  Float
+  currentAmount Float    @default(0)
+  targetDate    DateTime
+  accountId     String?
+  priority      String
+  status        String   @default("Active")
+  notes         String?
+  account       Account? @relation(fields: [accountId], references: [id], onDelete: SetNull)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+model PlaidItem {
+  id          String   @id @default(cuid())
+  itemId      String   @unique
+  accessToken String
+  institution String?
+  cursor      String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}

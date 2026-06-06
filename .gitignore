@@ -1,0 +1,17 @@
+# Local secrets
+.env
+.env.*
+!.env.example
+
+# Local database
+prisma/dev.db
+prisma/dev.db-journal
+
+# Dependencies and build outputs
+node_modules/
+dist/
+build/
+.next/
+
+# Logs
+*.log
