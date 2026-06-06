@@ -34,6 +34,7 @@ export type Account = {
   id: string;
   group: AccountGroup;
   name: string;
+  officialName?: string;
   subtype: string;
   last4: string;
   balance: number;
@@ -90,7 +91,8 @@ export type MerchantRule = {
   id: string;
   pattern: string;
   matchType: "exact" | "contains";
-  categoryId: string;
+  categoryId: string | null;
+  internal: boolean;
   enabled: boolean;
 };
 

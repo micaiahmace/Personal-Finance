@@ -24,6 +24,9 @@ model Account {
   updatedAt          DateTime      @updatedAt
   transactions       Transaction[]
   goals              SavingsGoal[]
+
+  @@index([plaidItemId])
+  @@index([type])
 }
 
 model BudgetGroup {
@@ -51,6 +54,8 @@ model BudgetCategory {
   recurrences  RecurringCharge[]
   createdAt    DateTime           @default(now())
   updatedAt    DateTime           @updatedAt
+
+  @@index([groupId])
 }
 
 model Transaction {
@@ -73,6 +78,11 @@ model Transaction {
   splits              TransactionSplit[]
   createdAt           DateTime           @default(now())
   updatedAt           DateTime           @updatedAt
+
+  @@index([accountId, date])
+  @@index([categoryId, date])
+  @@index([date])
+  @@index([pending, excluded, internalTransfer, date])
 }
 
 model TransactionSplit {
@@ -82,17 +92,24 @@ model TransactionSplit {
   amount        Float
   transaction   Transaction    @relation(fields: [transactionId], references: [id], onDelete: Cascade)
   category      BudgetCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+
+  @@index([transactionId])
+  @@index([categoryId])
 }
 
 model MerchantRule {
-  id         String         @id @default(cuid())
-  pattern    String
-  matchType  String
-  categoryId String
-  enabled    Boolean        @default(true)
-  category   BudgetCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
-  createdAt  DateTime       @default(now())
-  updatedAt  DateTime       @updatedAt
+  id               String         @id @default(cuid())
+  pattern          String
+  matchType        String
+  categoryId       String?
+  internalTransfer Boolean        @default(false)
+  enabled          Boolean        @default(true)
+  category         BudgetCategory? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+
+  @@index([categoryId])
+  @@index([enabled, createdAt])
 }
 
 model RecurringCharge {
@@ -105,6 +122,9 @@ model RecurringCharge {
   category   BudgetCategory? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
   createdAt  DateTime        @default(now())
   updatedAt  DateTime        @updatedAt
+
+  @@index([categoryId])
+  @@index([nextDate])
 }
 
 model SavingsGoal {
@@ -121,6 +141,9 @@ model SavingsGoal {
   account       Account? @relation(fields: [accountId], references: [id], onDelete: SetNull)
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
+
+  @@index([accountId])
+  @@index([status])
 }
 
 model PlaidItem {

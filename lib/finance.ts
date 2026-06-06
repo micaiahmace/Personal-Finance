@@ -1,4 +1,7 @@
-import type { Account, BudgetCategory, FinanceState, Goal, MerchantRule, Transaction } from "@/lib/types";
+import type { Account, BudgetCategory, BudgetGroup, FinanceState, Goal, MerchantRule, Transaction } from "@/lib/types";
+
+export const INCOME_GROUP_ID = "income";
+export const INCOME_CATEGORY_ID = "income";
 
 export const usd = new Intl.NumberFormat("en-US", {
   style: "currency",
@@ -13,6 +16,38 @@ export const usdExact = new Intl.NumberFormat("en-US", {
 
 export function categorySpent(state: FinanceState, categoryId: string) {
   return state.transactions.flatMap(expenseEntries).filter((entry) => entry.categoryId === categoryId).reduce((sum, entry) => sum + entry.amount, 0);
+}
+
+export function categorySpendMap(transactions: Transaction[]) {
+  const spendByCategory = new Map<string, number>();
+
+  for (const transaction of transactions) {
+    for (const entry of expenseEntries(transaction)) {
+      spendByCategory.set(entry.categoryId, (spendByCategory.get(entry.categoryId) || 0) + entry.amount);
+    }
+  }
+
+  return spendByCategory;
+}
+
+export function categorySpentFromMap(spendByCategory: Map<string, number>, categoryId: string) {
+  return spendByCategory.get(categoryId) || 0;
+}
+
+export function isBudgetGroup(group: Pick<BudgetGroup, "id">) {
+  return group.id !== INCOME_GROUP_ID;
+}
+
+export function isBudgetCategory(category: Pick<BudgetCategory, "id" | "groupId">) {
+  return category.id !== INCOME_CATEGORY_ID && category.groupId !== INCOME_GROUP_ID;
+}
+
+export function groupTotalsFromMap(categories: BudgetCategory[], spendByCategory: Map<string, number>, groupId: string) {
+  const groupCategories = categories.filter((category) => category.groupId === groupId);
+  return {
+    spent: groupCategories.reduce((sum, category) => sum + categorySpentFromMap(spendByCategory, category.id), 0),
+    budget: groupCategories.reduce((sum, category) => sum + Number(category.budget || 0), 0)
+  };
 }
 
 export function expenseEntries(transaction: Transaction) {
@@ -40,11 +75,14 @@ export function totalSpent(transactions: Transaction[]) {
 }
 
 export function incomeTotal(transactions: Transaction[]) {
-  return transactions.filter((transaction) => transaction.amount > 0 && !transaction.internal).reduce((sum, transaction) => sum + transaction.amount, 0);
+  return transactions.filter((transaction) => transaction.amount > 0 && !transaction.internal && !transaction.excluded).reduce((sum, transaction) => sum + transaction.amount, 0);
 }
 
 export function netWorth(accounts: Account[]) {
-  return accounts.reduce((sum, account) => sum + account.balance, 0);
+  return accounts.reduce((sum, account) => {
+    const balance = Number(account.balance || 0);
+    return account.group === "Credit card" ? sum - Math.abs(balance) : sum + balance;
+  }, 0);
 }
 
 export function percent(spent: number, budget: number) {

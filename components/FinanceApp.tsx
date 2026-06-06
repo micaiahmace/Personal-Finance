@@ -31,7 +31,7 @@ import {
   X
 } from "lucide-react";
 import { type CSSProperties, type FormEvent, useEffect, useMemo, useState } from "react";
-import { categorySpent, goalCurrent, groupTotals, monthsUntil, netWorth, percent, projectedDate, ruleMatches, totalBudget, totalSpent, usd, usdExact } from "@/lib/finance";
+import { INCOME_CATEGORY_ID, categorySpendMap, categorySpentFromMap, expenseEntries, goalCurrent, groupTotalsFromMap, isBudgetCategory, isBudgetGroup, monthsUntil, netWorth, percent, projectedDate, ruleMatches, totalBudget, totalSpent, usd, usdExact } from "@/lib/finance";
 import { seedState } from "@/lib/seed-data";
 import type { Account, AccountGroup, AiSuggestion, BudgetCategory, BudgetGroup, FinanceState, Goal, MerchantRule, Transaction, View } from "@/lib/types";
 
@@ -66,7 +66,8 @@ type RuleDraft = {
   id?: string;
   pattern: string;
   matchType: MerchantRule["matchType"];
-  categoryId: string;
+  categoryId: string | null;
+  internal: boolean;
   enabled: boolean;
 };
 
@@ -76,6 +77,12 @@ type CategoryDraft = {
   icon: string;
   budget: number;
   groupId: string;
+};
+
+type GroupDraft = {
+  id?: string;
+  name: string;
+  color: string;
 };
 
 type SplitDraft = {
@@ -96,6 +103,23 @@ type Notice = {
 };
 
 type BulkMenu = "category" | "type" | "more" | null;
+type PlaidStatus = {
+  configured: boolean;
+  env: string;
+  connectedItemCount: number;
+  accountCount: number;
+  transactionCount: number;
+  latestTransactionDate: string | null;
+  items: Array<{
+    itemId: string;
+    institution: string;
+    cursorReady: boolean;
+    updatedAt: string;
+  }>;
+};
+type PersistHandler = (nextState: FinanceState, currentState: FinanceState) => void | Promise<void>;
+type TransactionPatch = Partial<Pick<Transaction, "categoryId" | "reviewed" | "excluded" | "internal" | "note" | "splits">>;
+type BulkTransactionUpdate = TransactionPatch & { id: string };
 
 type PlaidLinkHandler = {
   open: () => void;
@@ -113,6 +137,14 @@ type PlaidLinkConfig = {
   onExit: (error?: { display_message?: string; error_message?: string } | null) => void;
 };
 
+type PendingPlaidExchange = {
+  publicToken: string;
+  institution?: string;
+  savedAt: number;
+};
+
+const INTERNAL_TRANSFER_ACTION = "__internal_transfer__";
+
 declare global {
   interface Window {
     Plaid?: {
@@ -121,16 +153,50 @@ declare global {
   }
 }
 
+const PENDING_PLAID_EXCHANGE_KEY = "personal-finance.pending-plaid-exchange";
+const PENDING_PLAID_EXCHANGE_MAX_AGE_MS = 25 * 60 * 1000;
+
 function uid(prefix: string) {
   return `${prefix}-${crypto.randomUUID().slice(0, 8)}`;
 }
 
-function sortedGroups(state: FinanceState) {
-  return [...state.groups].sort((a, b) => a.order - b.order);
+function savePendingPlaidExchange(publicToken: string, institution?: string) {
+  if (typeof window === "undefined") return;
+  const pending: PendingPlaidExchange = { publicToken, institution, savedAt: Date.now() };
+  window.sessionStorage.setItem(PENDING_PLAID_EXCHANGE_KEY, JSON.stringify(pending));
 }
 
-function sortedCategories(state: FinanceState, groupId?: string) {
-  return state.categories.filter((category) => !groupId || category.groupId === groupId).sort((a, b) => a.order - b.order);
+function loadPendingPlaidExchange() {
+  if (typeof window === "undefined") return null;
+
+  try {
+    const raw = window.sessionStorage.getItem(PENDING_PLAID_EXCHANGE_KEY);
+    if (!raw) return null;
+
+    const pending = JSON.parse(raw) as PendingPlaidExchange;
+    if (!pending.publicToken || Date.now() - pending.savedAt > PENDING_PLAID_EXCHANGE_MAX_AGE_MS) {
+      window.sessionStorage.removeItem(PENDING_PLAID_EXCHANGE_KEY);
+      return null;
+    }
+
+    return pending;
+  } catch {
+    window.sessionStorage.removeItem(PENDING_PLAID_EXCHANGE_KEY);
+    return null;
+  }
+}
+
+function clearPendingPlaidExchange() {
+  if (typeof window === "undefined") return;
+  window.sessionStorage.removeItem(PENDING_PLAID_EXCHANGE_KEY);
+}
+
+function sortedGroups(groups: BudgetGroup[]) {
+  return [...groups].sort((a, b) => a.order - b.order);
+}
+
+function sortedCategories(categories: BudgetCategory[], groupId?: string) {
+  return categories.filter((category) => !groupId || category.groupId === groupId).sort((a, b) => a.order - b.order);
 }
 
 function visibleView(view?: FinanceState["view"]): FinanceState["view"] {
@@ -138,8 +204,29 @@ function visibleView(view?: FinanceState["view"]): FinanceState["view"] {
   return view;
 }
 
-function progressStyle(value: number, color: string) {
-  return { "--progress": `${value}%`, "--bar": color } as CSSProperties;
+function progressStyle(value: number, color: string, recurring = 0, recurringPaid = 0) {
+  return { "--progress": `${value}%`, "--bar": color, "--recurring": `${recurring}%`, "--recurring-paid": `${recurringPaid}%` } as CSSProperties;
+}
+
+function recurringAmountMap(recurrences: FinanceState["recurrences"]) {
+  const map = new Map<string, number>();
+
+  for (const recurrence of recurrences) {
+    if (!recurrence.categoryId) continue;
+    map.set(recurrence.categoryId, (map.get(recurrence.categoryId) || 0) + Math.abs(Number(recurrence.amount) || 0));
+  }
+
+  return map;
+}
+
+function recurringAmountFromMap(recurringByCategory: Map<string, number>, categoryId: string) {
+  return recurringByCategory.get(categoryId) || 0;
+}
+
+function groupRecurringAmountFromMap(categories: BudgetCategory[], recurringByCategory: Map<string, number>, groupId: string) {
+  return categories
+    .filter((category) => category.groupId === groupId)
+    .reduce((sum, category) => sum + recurringAmountFromMap(recurringByCategory, category.id), 0);
 }
 
 function categoryLabel(category?: BudgetCategory) {
@@ -148,6 +235,7 @@ function categoryLabel(category?: BudgetCategory) {
 
 function categoryTone(category?: BudgetCategory) {
   const name = category?.name.toLowerCase() || "";
+  if (name.includes("income")) return "border-emerald-400/30 bg-emerald-500/20 text-emerald-100";
   if (name.includes("gas")) return "border-red-400/30 bg-red-500/20 text-red-200";
   if (name.includes("eating")) return "border-blue-400/30 bg-blue-500/20 text-blue-200";
   if (name.includes("groceries")) return "border-emerald-400/30 bg-emerald-500/20 text-emerald-100";
@@ -155,8 +243,22 @@ function categoryTone(category?: BudgetCategory) {
   return "border-blue-400/25 bg-blue-500/15 text-blue-100";
 }
 
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function accountDisplayName(account: Account) {
+  const name = (account.officialName || account.name).trim();
+  const last4 = account.last4.trim();
+  if (!last4) return name;
+
+  const maskedAtEnd = new RegExp(`(?:\\s|[-#*()])*${escapeRegExp(last4)}\\s*$`, "i");
+  const cleanName = name.replace(maskedAtEnd, "").replace(/\s{2,}/g, " ").trim();
+  return cleanName || name;
+}
+
 function accountSource(account?: Account) {
-  return account ? `${account.name.split(" ")[0]} ${account.last4}` : "Unknown";
+  return account ? `${accountDisplayName(account).split(" ")[0]} ${account.last4}` : "Unknown";
 }
 
 function formatTransactionGroupDate(value: string) {
@@ -176,43 +278,117 @@ function formatTransactionMonth(value: string) {
   return parseLocalDate(`${value.slice(0, 7)}-01`).toLocaleDateString("en-US", { month: "long", year: "numeric" });
 }
 
+function currentMonthKey() {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+}
+
+function transactionMonthKey(transaction: Transaction) {
+  return transaction.date.slice(0, 7);
+}
+
+function transactionsInMonth(transactions: Transaction[], monthKey: string) {
+  return transactions.filter((transaction) => transactionMonthKey(transaction) === monthKey);
+}
+
+function formatMonthKey(value: string) {
+  return formatTransactionMonth(`${value}-01`);
+}
+
+function transactionHasCategory(transaction: Transaction, categoryId: string) {
+  return expenseEntries(transaction).some((entry) => entry.categoryId === categoryId);
+}
+
+function categorySpendForTransactions(transactions: Transaction[], categoryId: string) {
+  return transactions
+    .flatMap(expenseEntries)
+    .filter((entry) => entry.categoryId === categoryId)
+    .reduce((sum, entry) => sum + entry.amount, 0);
+}
+
+function defaultCategoryIdForTransaction(transaction: Transaction) {
+  if (transaction.internal) return null;
+  if (transaction.amount > 0 && !transaction.excluded && !transaction.categoryId) return INCOME_CATEGORY_ID;
+  return transaction.categoryId;
+}
+
 function groupTransactionsByMonth(transactions: Transaction[]) {
-  return transactions.reduce<Array<{
+  const monthIndexes = new Map<string, number>();
+  const dayIndexesByMonth = new Map<string, Map<string, number>>();
+  const months: Array<{
     key: string;
     label: string;
     total: number;
     days: Array<{ date: string; transactions: Transaction[] }>;
-  }>>((months, transaction) => {
-    const monthKey = transaction.date.slice(0, 7);
-    let month = months.find((item) => item.key === monthKey);
+  }> = [];
 
-    if (!month) {
-      month = {
+  for (const transaction of transactions) {
+    const monthKey = transaction.date.slice(0, 7);
+    let monthIndex = monthIndexes.get(monthKey);
+
+    if (monthIndex === undefined) {
+      monthIndex = months.length;
+      monthIndexes.set(monthKey, monthIndex);
+      dayIndexesByMonth.set(monthKey, new Map());
+      months.push({
         key: monthKey,
         label: formatTransactionMonth(transaction.date),
         total: 0,
         days: []
-      };
-      months.push(month);
+      });
     }
 
+    const month = months[monthIndex];
     if (!transaction.excluded && !transaction.internal && transaction.amount < 0) {
       month.total += Math.abs(transaction.amount);
     }
 
-    let day = month.days.find((item) => item.date === transaction.date);
-    if (!day) {
-      day = { date: transaction.date, transactions: [] };
-      month.days.push(day);
+    const dayIndexes = dayIndexesByMonth.get(monthKey);
+    let dayIndex = dayIndexes?.get(transaction.date);
+
+    if (dayIndex === undefined) {
+      dayIndex = month.days.length;
+      dayIndexes?.set(transaction.date, dayIndex);
+      month.days.push({ date: transaction.date, transactions: [] });
     }
 
-    day.transactions.push(transaction);
-    return months;
-  }, []);
+    month.days[dayIndex].transactions.push(transaction);
+  }
+
+  return months;
 }
 
 function parseLocalDate(value: string) {
   return new Date(`${value.slice(0, 10)}T00:00:00`);
+}
+
+function formatStatusDate(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Not synced";
+  return date.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+}
+
+function transactionMatchesRule(rule: MerchantRule, transaction: Transaction) {
+  return ruleMatches(rule, transaction.name) || ruleMatches(rule, transaction.merchant);
+}
+
+function transactionMatchesRuleDraft(draft: RuleDraft, transaction: Transaction) {
+  const pattern = draft.pattern.trim();
+  if (!pattern) return false;
+  return transactionMatchesRule({
+    id: draft.id || "rule-preview",
+    pattern,
+    matchType: draft.matchType,
+    categoryId: draft.categoryId,
+    internal: draft.internal,
+    enabled: draft.enabled
+  }, transaction);
+}
+
+function ruleActionLabel(rule: Pick<RuleDraft | MerchantRule, "categoryId" | "internal">, categoriesById: Map<string, BudgetCategory>) {
+  if (rule.internal) return "Internal transfer";
+  const category = rule.categoryId ? categoriesById.get(rule.categoryId) : undefined;
+  return category ? `${category.icon} ${category.name}` : "Uncategorized";
 }
 
 function loadPlaidLinkScript() {
@@ -249,6 +425,30 @@ async function persistData(nextState: FinanceState) {
   }
 }
 
+async function patchTransaction(transactionId: string, patch: TransactionPatch) {
+  try {
+    await fetch(`/api/transactions/${encodeURIComponent(transactionId)}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(patch)
+    });
+  } catch {
+    // The local UI stays responsive; the next full refresh will reveal any failed local write.
+  }
+}
+
+async function bulkPatchTransactions(body: { updates?: BulkTransactionUpdate[]; deleteIds?: string[] }) {
+  try {
+    await fetch("/api/transactions/bulk", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body)
+    });
+  } catch {
+    // The local UI stays responsive; the next full refresh will reveal any failed local write.
+  }
+}
+
 export function FinanceApp() {
   const [state, setState] = useState<FinanceState>(seedState);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -256,17 +456,51 @@ export function FinanceApp() {
   const [ruleDraft, setRuleDraft] = useState<RuleDraft | null>(null);
   const [transactionDraft, setTransactionDraft] = useState<Transaction | null>(null);
   const [categoryDraft, setCategoryDraft] = useState<CategoryDraft | null>(null);
+  const [groupDraft, setGroupDraft] = useState<GroupDraft | null>(null);
   const [splitDraft, setSplitDraft] = useState<SplitDraft | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
+  const [selectedCategoryId, setSelectedCategoryId] = useState<string | null>(null);
   const [selectedTransactionIds, setSelectedTransactionIds] = useState<string[]>([]);
   const [bulkMenu, setBulkMenu] = useState<BulkMenu>(null);
   const [plaidBusy, setPlaidBusy] = useState(false);
   const [aiStatus, setAiStatus] = useState<AiStatus>({ ok: false, label: "AI checking" });
+  const [plaidStatus, setPlaidStatus] = useState<PlaidStatus | null>(null);
   const [netWorthRange, setNetWorthRange] = useState<TimeRange>("1W");
   const [investmentRange, setInvestmentRange] = useState<TimeRange>("1W");
 
   const categoriesById = useMemo(() => new Map(state.categories.map((category) => [category.id, category])), [state.categories]);
+  const selectedCategory = selectedCategoryId ? categoriesById.get(selectedCategoryId) : undefined;
   const accountsById = useMemo(() => new Map(state.accounts.map((account) => [account.id, account])), [state.accounts]);
+  const allSortedCategories = useMemo(() => sortedCategories(state.categories), [state.categories]);
+  const sortedBudgetGroups = useMemo(() => sortedGroups(state.groups).filter(isBudgetGroup), [state.groups]);
+  const sortedBudgetCategories = useMemo(() => allSortedCategories.filter(isBudgetCategory), [allSortedCategories]);
+  const categoriesByGroup = useMemo(() => {
+    const grouped = new Map<string, BudgetCategory[]>();
+    for (const category of sortedBudgetCategories) {
+      grouped.set(category.groupId, [...(grouped.get(category.groupId) || []), category]);
+    }
+    return grouped;
+  }, [sortedBudgetCategories]);
+  const budgetMonthKey = currentMonthKey();
+  const budgetMonthTransactions = useMemo(() => transactionsInMonth(state.transactions, budgetMonthKey), [budgetMonthKey, state.transactions]);
+  const spendByCategory = useMemo(() => categorySpendMap(budgetMonthTransactions), [budgetMonthTransactions]);
+  const recurringByCategory = useMemo(() => recurringAmountMap(state.recurrences), [state.recurrences]);
+  const totalBudgetAmount = useMemo(() => totalBudget(sortedBudgetCategories), [sortedBudgetCategories]);
+  const totalSpentAmount = useMemo(() => totalSpent(budgetMonthTransactions), [budgetMonthTransactions]);
+  const netWorthAmount = useMemo(() => netWorth(state.accounts), [state.accounts]);
+  const reviewSuggestionIds = useMemo(() => new Set(state.aiInbox.map((item) => item.transactionId)), [state.aiInbox]);
+  const lowConfidenceReviewByTransaction = useMemo(
+    () => new Map(state.aiInbox.filter((item) => item.confidence < 0.9).map((item) => [item.transactionId, item])),
+    [state.aiInbox]
+  );
+  const selectedTransactionIdSet = useMemo(() => new Set(selectedTransactionIds), [selectedTransactionIds]);
+  const filteredTransactions = useMemo(() => {
+    const search = state.search.toLowerCase();
+    return [...state.transactions]
+      .filter((transaction) => !state.categoryFilter || transaction.categoryId === state.categoryFilter || transaction.splits?.some((split) => split.categoryId === state.categoryFilter))
+      .filter((transaction) => !search || `${transaction.name} ${transaction.merchant} ${transaction.note}`.toLowerCase().includes(search))
+      .sort((a, b) => b.date.localeCompare(a.date));
+  }, [state.categoryFilter, state.search, state.transactions]);
 
   useEffect(() => {
     let alive = true;
@@ -294,6 +528,8 @@ export function FinanceApp() {
         setAiStatus(health.openaiConfigured ? { ok: true, label: "AI ready" } : { ok: false, label: "AI offline" });
       })
       .catch(() => setAiStatus({ ok: false, label: "AI offline" }));
+
+    void refreshPlaidStatus();
 
     return () => {
       alive = false;
@@ -324,29 +560,91 @@ export function FinanceApp() {
     });
   }
 
-  function commit(mutator: (draft: FinanceState) => void) {
+  async function refreshPlaidStatus() {
+    try {
+      const response = await fetch("/api/plaid/status", { cache: "no-store" });
+      if (!response.ok) return;
+      setPlaidStatus((await response.json()) as PlaidStatus);
+    } catch {
+      setPlaidStatus(null);
+    }
+  }
+
+  function commit(mutator: (draft: FinanceState) => void, persist: PersistHandler = persistData) {
     setState((current) => {
       const draft = structuredClone(current);
       mutator(draft);
-      persistData(draft);
+      void persist(draft, current);
       return draft;
     });
   }
 
+  function toggleAccountGroup(group: AccountGroup) {
+    setState((current) => ({
+      ...current,
+      accountGroupsOpen: {
+        ...current.accountGroupsOpen,
+        [group]: !current.accountGroupsOpen[group]
+      }
+    }));
+  }
+
   function applyRules() {
+    const updates: BulkTransactionUpdate[] = [];
+
+    for (const transaction of state.transactions) {
+      let categoryId = defaultCategoryIdForTransaction(transaction);
+      let internal = transaction.internal;
+      let excluded = transaction.excluded;
+      let matched = false;
+
+      for (const rule of state.rules) {
+        if (!rule.enabled || !transactionMatchesRule(rule, transaction)) continue;
+        matched = true;
+        categoryId = rule.internal ? null : rule.categoryId;
+        if (rule.internal) {
+          internal = true;
+          excluded = true;
+        }
+      }
+
+      if ((matched || categoryId !== transaction.categoryId) && (categoryId !== transaction.categoryId || internal !== transaction.internal || excluded !== transaction.excluded || !transaction.reviewed)) {
+        updates.push({
+          id: transaction.id,
+          categoryId,
+          ...(internal !== transaction.internal ? { internal } : {}),
+          ...(excluded !== transaction.excluded ? { excluded } : {}),
+          reviewed: true
+        });
+      }
+    }
+
     commit((draft) => {
       draft.transactions.forEach((transaction) => {
+        transaction.categoryId = defaultCategoryIdForTransaction(transaction);
         draft.rules.forEach((rule) => {
-          if (rule.enabled && ruleMatches(rule, transaction.name)) {
-            transaction.categoryId = rule.categoryId;
+          if (rule.enabled && transactionMatchesRule(rule, transaction)) {
+            transaction.categoryId = rule.internal ? null : rule.categoryId;
+            if (rule.internal) {
+              transaction.internal = true;
+              transaction.excluded = true;
+            }
             transaction.reviewed = true;
           }
         });
       });
-    });
+    }, () => bulkPatchTransactions({ updates }));
   }
 
   function approveHighConfidenceAi() {
+    const updates = state.aiInbox
+      .filter((item) => item.confidence >= 0.9)
+      .map((item) => ({
+        id: item.transactionId,
+        ...(item.internal ? { categoryId: null, internal: true, excluded: true } : item.categoryId ? { categoryId: item.categoryId } : {}),
+        reviewed: true
+      }));
+
     commit((draft) => {
       draft.aiInbox
         .filter((item) => item.confidence >= 0.9)
@@ -356,59 +654,94 @@ export function FinanceApp() {
           if (item.internal) {
             transaction.internal = true;
             transaction.excluded = true;
+            transaction.categoryId = null;
+          } else if (item.categoryId) {
+            transaction.categoryId = item.categoryId;
           }
-          if (item.categoryId) transaction.categoryId = item.categoryId;
           transaction.reviewed = true;
         });
       draft.aiInbox = draft.aiInbox.filter((item) => item.confidence < 0.9);
-    });
+    }, () => bulkPatchTransactions({ updates }));
   }
 
   function detectTransfers() {
-    let count = 0;
-    commit((draft) => {
-      const expenses = draft.transactions.filter((transaction) => transaction.amount < 0);
-      const deposits = draft.transactions.filter((transaction) => transaction.amount > 0);
-      expenses.forEach((expense) => {
-        deposits.forEach((deposit) => {
-          const sameAmount = Math.abs(Math.abs(expense.amount) - deposit.amount) < 0.01;
-          const differentAccount = expense.accountId !== deposit.accountId;
-          const closeDate = Math.abs((new Date(expense.date).getTime() - new Date(deposit.date).getTime()) / 86400000) <= 3;
-          if (sameAmount && differentAccount && closeDate) {
-            expense.internal = true;
-            deposit.internal = true;
-            expense.excluded = true;
-            deposit.excluded = true;
-            count += 2;
-          }
-        });
+    const expenses = state.transactions.filter((transaction) => transaction.amount < 0);
+    const deposits = state.transactions.filter((transaction) => transaction.amount > 0);
+    const matchedIds = new Set<string>();
+
+    expenses.forEach((expense) => {
+      deposits.forEach((deposit) => {
+        if (matchedIds.has(expense.id) || matchedIds.has(deposit.id)) return;
+        const sameAmount = Math.abs(Math.abs(expense.amount) - deposit.amount) < 0.01;
+        const differentAccount = expense.accountId !== deposit.accountId;
+        const closeDate = Math.abs((new Date(expense.date).getTime() - new Date(deposit.date).getTime()) / 86400000) <= 3;
+        if (sameAmount && differentAccount && closeDate) {
+          matchedIds.add(expense.id);
+          matchedIds.add(deposit.id);
+        }
       });
     });
+
+    const updates = [...matchedIds].map((id) => ({ id, categoryId: null, internal: true, excluded: true, reviewed: true }));
+
+    commit((draft) => {
+      draft.transactions.forEach((transaction) => {
+        if (matchedIds.has(transaction.id)) {
+          transaction.categoryId = null;
+          transaction.internal = true;
+          transaction.excluded = true;
+          transaction.reviewed = true;
+        }
+      });
+    }, () => bulkPatchTransactions({ updates }));
     setNotice({
       title: "Transfer scan complete",
-      message: `${count} transactions were marked as likely internal transfers.`
+      message: `${updates.length} transactions were marked as likely internal transfers.`
     });
   }
 
-  function openRule(rule?: MerchantRule, pattern = "") {
+  function openRule(rule?: MerchantRule, pattern = "", options: Partial<RuleDraft> = {}) {
     setRuleDraft({
       id: rule?.id,
       pattern: rule?.pattern || pattern,
-      matchType: rule?.matchType || "contains",
-      categoryId: rule?.categoryId || state.categories[0]?.id || "",
-      enabled: rule?.enabled ?? true
+      matchType: rule?.matchType || options.matchType || "contains",
+      categoryId: rule?.internal ? null : rule?.categoryId ?? options.categoryId ?? state.categories[0]?.id ?? "",
+      internal: rule?.internal ?? options.internal ?? false,
+      enabled: rule?.enabled ?? options.enabled ?? true
     });
   }
 
   function saveRule(event: FormEvent) {
     event.preventDefault();
-    if (!ruleDraft?.pattern || !ruleDraft.categoryId) return;
+    if (!ruleDraft) return;
+
+    const savedRule: MerchantRule = {
+      id: ruleDraft.id || uid("rule"),
+      pattern: ruleDraft.pattern.trim(),
+      matchType: ruleDraft.matchType,
+      categoryId: ruleDraft.internal ? null : ruleDraft.categoryId,
+      internal: ruleDraft.internal,
+      enabled: ruleDraft.enabled
+    };
+
+    if (!savedRule.pattern || (!savedRule.internal && !savedRule.categoryId)) return;
+
     commit((draft) => {
       if (ruleDraft.id) {
         const target = draft.rules.find((rule) => rule.id === ruleDraft.id);
-        if (target) Object.assign(target, ruleDraft);
+        if (target) Object.assign(target, savedRule);
       } else {
-        draft.rules.push({ id: uid("rule"), ...ruleDraft });
+        draft.rules.push(savedRule);
+      }
+
+      if (savedRule.enabled) {
+        draft.transactions.forEach((transaction) => {
+          if (!transactionMatchesRule(savedRule, transaction)) return;
+          transaction.categoryId = savedRule.internal ? null : savedRule.categoryId;
+          transaction.internal = savedRule.internal;
+          transaction.excluded = savedRule.internal ? true : false;
+          transaction.reviewed = true;
+        });
       }
     });
     setRuleDraft(null);
@@ -419,7 +752,7 @@ export function FinanceApp() {
   }
 
   function splitTransaction(transaction: Transaction) {
-    const category = sortedCategories(state)[0];
+    const category = sortedBudgetCategories[0];
     if (!category || transaction.amount >= 0) return;
     const amount = Math.abs(transaction.amount);
     setSplitDraft({
@@ -430,12 +763,59 @@ export function FinanceApp() {
     });
   }
 
+  async function exchangePlaidPublicToken(publicToken: string, institution?: string) {
+    let exchangeResponse: Response;
+    try {
+      exchangeResponse = await fetch("/api/plaid/exchange", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ publicToken, institution })
+      });
+    } catch {
+      throw new Error("Could not reach the local Plaid exchange route. The Plaid token was saved in this browser; click Connect again within a few minutes to retry without signing in again.");
+    }
+
+    const exchangeData = await exchangeResponse.json().catch(() => ({}));
+    if (!exchangeResponse.ok) {
+      throw new Error(exchangeData.error || "Unable to exchange Plaid token.");
+    }
+
+    const dataResponse = await fetch("/api/app-data", { cache: "no-store" });
+    const nextData = (await dataResponse.json()) as FinanceState;
+    setState((current) => ({
+      ...nextData,
+      theme: current.theme,
+      view: current.view,
+      selectedAccountId: current.selectedAccountId || nextData.accounts[0]?.id || ""
+    }));
+    clearPendingPlaidExchange();
+    setNotice({
+      title: exchangeData.sync?.deferred ? "Account connected" : "Account synced",
+      message: exchangeData.sync?.deferred
+        ? "Plaid connected successfully. Transaction history may take a little longer, so use Sync again in a minute if accounts do not appear yet."
+        : "Plaid connected successfully and synced the first batch of accounts and transactions."
+    });
+    void refreshPlaidStatus();
+  }
+
   async function connectModal() {
     if (plaidBusy) return;
     setPlaidBusy(true);
 
     try {
-      const linkResponse = await fetch("/api/plaid/link-token", { method: "POST" });
+      const pendingExchange = loadPendingPlaidExchange();
+      if (pendingExchange) {
+        await exchangePlaidPublicToken(pendingExchange.publicToken, pendingExchange.institution);
+        setPlaidBusy(false);
+        return;
+      }
+
+      let linkResponse: Response;
+      try {
+        linkResponse = await fetch("/api/plaid/link-token", { method: "POST", cache: "no-store" });
+      } catch {
+        throw new Error("Could not reach the local Plaid setup route. Refresh the app and make sure the dev server is running on port 3000.");
+      }
       const linkData = await linkResponse.json();
       if (!linkResponse.ok || !linkData.link_token) {
         throw new Error(linkData.error || "Unable to create Plaid link token.");
@@ -447,38 +827,13 @@ export function FinanceApp() {
       const handler = window.Plaid.create({
         token: linkData.link_token,
         onSuccess: async (publicToken, metadata) => {
+          savePendingPlaidExchange(publicToken, metadata.institution?.name);
           try {
-            const exchangeResponse = await fetch("/api/plaid/exchange", {
-              method: "POST",
-              headers: { "content-type": "application/json" },
-              body: JSON.stringify({
-                publicToken,
-                institution: metadata.institution?.name
-              })
-            });
-            const exchangeData = await exchangeResponse.json();
-            if (!exchangeResponse.ok) {
-              throw new Error(exchangeData.error || "Unable to exchange Plaid token.");
-            }
-
-            const dataResponse = await fetch("/api/app-data");
-            const nextData = (await dataResponse.json()) as FinanceState;
-            setState((current) => ({
-              ...nextData,
-              theme: current.theme,
-              view: current.view,
-              selectedAccountId: current.selectedAccountId || nextData.accounts[0]?.id || ""
-            }));
-            setNotice({
-              title: exchangeData.sync?.deferred ? "Account connected" : "Account synced",
-              message: exchangeData.sync?.deferred
-                ? "Plaid connected successfully. Transaction history may take a little longer, so use Sync again in a minute if accounts do not appear yet."
-                : "Plaid connected successfully and synced the first batch of accounts and transactions."
-            });
+            await exchangePlaidPublicToken(publicToken, metadata.institution?.name);
           } catch (error) {
             setNotice({
               title: "Plaid sync needs attention",
-              message: error instanceof Error ? error.message : "Plaid connected, but the first sync did not finish."
+              message: error instanceof Error ? error.message : "Plaid connected, but the first sync did not finish. Click Connect again soon to retry without signing in again."
             });
           } finally {
             setPlaidBusy(false);
@@ -517,6 +872,14 @@ export function FinanceApp() {
     });
   }
 
+  function openGroupModal(group?: BudgetGroup) {
+    setGroupDraft({
+      id: group?.id,
+      name: group?.name || "",
+      color: group?.color || "#398ff0"
+    });
+  }
+
   function saveCategory(draft: CategoryDraft) {
     commit((stateDraft) => {
       if (draft.id) {
@@ -530,27 +893,56 @@ export function FinanceApp() {
     setCategoryDraft(null);
   }
 
+  function saveGroup(draft: GroupDraft) {
+    const name = draft.name.trim();
+    if (!name) return;
+
+    commit((stateDraft) => {
+      if (draft.id) {
+        const target = stateDraft.groups.find((group) => group.id === draft.id);
+        if (target) {
+          target.name = name;
+          target.color = draft.color;
+        }
+      } else {
+        const order = Math.max(0, ...stateDraft.groups.map((group) => group.order)) + 1;
+        stateDraft.groups.push({
+          id: uid("group"),
+          name,
+          color: draft.color,
+          order,
+          expanded: true
+        });
+      }
+    });
+    setGroupDraft(null);
+  }
+
   function saveTransaction(transaction: Transaction) {
+    const saved = transaction.internal
+      ? { ...transaction, categoryId: null, excluded: true, reviewed: true }
+      : { ...transaction, categoryId: defaultCategoryIdForTransaction(transaction), reviewed: true };
     commit((draft) => {
       const target = draft.transactions.find((item) => item.id === transaction.id);
-      if (target) Object.assign(target, { ...transaction, reviewed: true });
-    });
+      if (target) Object.assign(target, saved);
+    }, () => patchTransaction(saved.id, saved));
     setTransactionDraft(null);
   }
 
   function saveSplit(draft: SplitDraft) {
     const amount = Math.abs(draft.transaction.amount);
     if (draft.firstAmount <= 0 || draft.firstAmount >= amount) return;
+    const splits = [
+      { categoryId: draft.firstCategoryId, amount: draft.firstAmount },
+      { categoryId: draft.secondCategoryId, amount: Number((amount - draft.firstAmount).toFixed(2)) }
+    ];
     commit((stateDraft) => {
       const target = stateDraft.transactions.find((item) => item.id === draft.transaction.id);
       if (target) {
-        target.splits = [
-          { categoryId: draft.firstCategoryId, amount: draft.firstAmount },
-          { categoryId: draft.secondCategoryId, amount: Number((amount - draft.firstAmount).toFixed(2)) }
-        ];
+        target.splits = splits;
         target.reviewed = true;
       }
-    });
+    }, () => patchTransaction(draft.transaction.id, { splits, reviewed: true }));
     setSplitDraft(null);
   }
 
@@ -567,49 +959,83 @@ export function FinanceApp() {
     setBulkMenu(null);
   }
 
-  function assignSelectedCategory(categoryId: string | null) {
-    const selected = new Set(selectedTransactionIds);
+  function openCategoryTransactions(category: BudgetCategory) {
+    setSelectedCategoryId(category.id);
+    setState((current) => current.search ? { ...current, search: "" } : current);
+    clearTransactionSelection();
+  }
+
+  function closeCategoryTransactions() {
+    setSelectedCategoryId(null);
+    clearTransactionSelection();
+  }
+
+  function assignSelectedCategory(categoryId: string | null, transactionIds = selectedTransactionIds) {
+    const selected = new Set(transactionIds);
+    const updates = transactionIds.map((id) => ({ id, categoryId, ...(categoryId ? { internal: false, excluded: false } : {}), reviewed: true }));
     commit((draft) => {
       draft.transactions.forEach((transaction) => {
         if (selected.has(transaction.id)) {
           transaction.categoryId = categoryId;
+          if (categoryId) {
+            transaction.internal = false;
+            transaction.excluded = false;
+          }
           transaction.reviewed = true;
         }
       });
-    });
+    }, () => bulkPatchTransactions({ updates }));
     clearTransactionSelection();
   }
 
-  function assignSelectedType(type: "transaction" | "transfer") {
-    const selected = new Set(selectedTransactionIds);
+  function assignSelectedType(type: "transaction" | "transfer", transactionIds = selectedTransactionIds) {
+    const selected = new Set(transactionIds);
+    const updates = state.transactions
+      .filter((transaction) => selected.has(transaction.id))
+      .map((transaction) => {
+        const nextCategoryId = type === "transfer"
+          ? null
+          : defaultCategoryIdForTransaction({ ...transaction, internal: false, excluded: false });
+        return {
+          id: transaction.id,
+          categoryId: nextCategoryId,
+          internal: type === "transfer",
+          excluded: type === "transfer",
+          reviewed: true
+        };
+      });
     commit((draft) => {
       draft.transactions.forEach((transaction) => {
         if (selected.has(transaction.id)) {
+          transaction.categoryId = type === "transfer"
+            ? null
+            : defaultCategoryIdForTransaction({ ...transaction, internal: false, excluded: false });
           transaction.internal = type === "transfer";
           transaction.excluded = type === "transfer" ? true : false;
           transaction.reviewed = true;
         }
       });
-    });
+    }, () => bulkPatchTransactions({ updates }));
     clearTransactionSelection();
   }
 
-  function deleteSelectedTransactions() {
-    const selected = new Set(selectedTransactionIds);
+  function deleteSelectedTransactions(transactionIds = selectedTransactionIds) {
+    const selected = new Set(transactionIds);
+    const deleteIds = [...transactionIds];
     commit((draft) => {
       draft.transactions = draft.transactions.filter((transaction) => !selected.has(transaction.id));
       draft.aiInbox = draft.aiInbox.filter((item) => !selected.has(item.transactionId));
-    });
+    }, () => bulkPatchTransactions({ deleteIds }));
     clearTransactionSelection();
   }
 
-  const pageTitle = nav.find((item) => item.id === state.view)?.label || "Dashboard";
+  const pageTitle = state.view === "categories" && selectedCategory ? `${selectedCategory.icon} ${selectedCategory.name}` : nav.find((item) => item.id === state.view)?.label || "Dashboard";
   const pageKicker = {
-    dashboard: `${usd.format(totalBudget(state.categories) - totalSpent(state.transactions))} left this month`,
+    dashboard: `${usd.format(totalBudgetAmount - totalSpentAmount)} left this month`,
     transactions: `${state.transactions.filter((transaction) => !transaction.reviewed).length} need review`,
     accounts: `${state.accounts.length} account shells`,
     investments: `${usd.format(state.accounts.filter((account) => account.group === "Investment").reduce((sum, account) => sum + account.balance, 0))} invested`,
-    categories: `${state.categories.length} spend categories`,
+    categories: selectedCategory ? `${formatMonthKey(budgetMonthKey)} transactions` : `${sortedBudgetCategories.length} spend categories`,
     recurrings: `${state.recurrences.length} recurring charges`,
     goals: `${usd.format(state.goals.reduce((sum, goal) => sum + goalCurrent(goal, accountsById.get(goal.accountId)), 0))} saved toward goals`,
     rules: `${state.rules.filter((rule) => rule.enabled).length} active merchant rules`,
@@ -648,9 +1074,7 @@ export function FinanceApp() {
                 <div key={group} className="mb-2">
                   <button
                     className="flex w-full items-center justify-between rounded-xl px-3 py-3 text-left font-black text-blue-200 hover:bg-[var(--surface-2)]"
-                    onClick={() => commit((draft) => {
-                      draft.accountGroupsOpen[group] = !draft.accountGroupsOpen[group];
-                    })}
+                    onClick={() => toggleAccountGroup(group)}
                   >
                     <span className="flex items-center gap-2">{open ? <ChevronDown size={15} /> : <ChevronRight size={15} />}{group}</span>
                     <span>{accounts.length}</span>
@@ -659,7 +1083,7 @@ export function FinanceApp() {
                     <div className="grid gap-1 pl-7">
                       {accounts.map((account) => (
                         <button key={account.id} className="rounded-lg px-2 py-2 text-left text-sm font-bold text-[var(--muted)] hover:bg-[var(--surface-2)] hover:text-[var(--text)]" onClick={() => setUi({ view: "accounts", selectedAccountId: account.id })}>
-                          {account.name} {account.last4}
+                          <span className="truncate">{accountDisplayName(account)}{account.last4 ? <span className="ml-1 text-blue-300/70">{account.last4}</span> : null}</span>
                         </button>
                       ))}
                     </div>
@@ -683,7 +1107,11 @@ export function FinanceApp() {
             </div>
             <nav className="order-3 flex w-full gap-2 overflow-x-auto rounded-full border border-[var(--line)] bg-[var(--surface)] p-1.5 md:order-none md:w-auto">
               {nav.map((item) => (
-                <button key={item.id} className={`whitespace-nowrap rounded-full px-4 py-2 text-sm font-black transition ${state.view === item.id ? "bg-gradient-to-r from-blue-500 to-sky-400 text-white shadow-soft" : "text-[var(--muted)] hover:bg-[var(--surface-2)]"}`} onClick={() => setUi({ view: item.id })}>
+                <button key={item.id} className={`whitespace-nowrap rounded-full px-4 py-2 text-sm font-black transition ${state.view === item.id ? "bg-gradient-to-r from-blue-500 to-sky-400 text-white shadow-soft" : "text-[var(--muted)] hover:bg-[var(--surface-2)]"}`} onClick={() => {
+                  if (item.id === "categories") setSelectedCategoryId(null);
+                  clearTransactionSelection();
+                  setUi({ view: item.id });
+                }}>
                   {item.label}
                 </button>
               ))}
@@ -704,7 +1132,8 @@ export function FinanceApp() {
         <SettingsModal
           activeTab={settingsTab}
           state={state}
-          categories={sortedCategories(state)}
+          plaidStatus={plaidStatus}
+          categories={allSortedCategories}
           setActiveTab={setSettingsTab}
           setState={setState}
           onClose={() => setSettingsOpen(false)}
@@ -720,21 +1149,22 @@ export function FinanceApp() {
           })}
         />
       ) : null}
-      {ruleDraft ? <RuleModal draft={ruleDraft} categories={sortedCategories(state)} setDraft={setRuleDraft} onClose={() => setRuleDraft(null)} onSave={saveRule} /> : null}
-      {transactionDraft ? <TransactionModal transaction={transactionDraft} accounts={state.accounts} categories={sortedCategories(state)} onClose={() => setTransactionDraft(null)} onSave={saveTransaction} /> : null}
-      {categoryDraft ? <CategoryModal draft={categoryDraft} groups={sortedGroups(state)} setDraft={setCategoryDraft} onClose={() => setCategoryDraft(null)} onSave={saveCategory} /> : null}
-      {splitDraft ? <SplitModal draft={splitDraft} categories={sortedCategories(state)} setDraft={setSplitDraft} onClose={() => setSplitDraft(null)} onSave={saveSplit} /> : null}
+      {ruleDraft ? <RuleModal draft={ruleDraft} categories={allSortedCategories} accounts={state.accounts} transactions={state.transactions} setDraft={setRuleDraft} onClose={() => setRuleDraft(null)} onSave={saveRule} /> : null}
+      {transactionDraft ? <TransactionModal transaction={transactionDraft} accounts={state.accounts} categories={allSortedCategories} onClose={() => setTransactionDraft(null)} onSave={saveTransaction} /> : null}
+      {categoryDraft ? <CategoryModal draft={categoryDraft} groups={sortedBudgetGroups} setDraft={setCategoryDraft} onClose={() => setCategoryDraft(null)} onSave={saveCategory} /> : null}
+      {groupDraft ? <GroupModal draft={groupDraft} setDraft={setGroupDraft} onClose={() => setGroupDraft(null)} onSave={saveGroup} /> : null}
+      {splitDraft ? <SplitModal draft={splitDraft} categories={sortedBudgetCategories} setDraft={setSplitDraft} onClose={() => setSplitDraft(null)} onSave={saveSplit} /> : null}
       {notice ? <NoticeModal notice={notice} onClose={() => setNotice(null)} /> : null}
     </div>
   );
 
   function renderDashboard() {
-    const budget = totalBudget(state.categories);
-    const spent = totalSpent(state.transactions);
+    const budget = totalBudgetAmount;
+    const spent = totalSpentAmount;
     const remainingBudget = budget - spent;
     const overBudget = remainingBudget < 0;
     const reviewTransactions = [...state.transactions]
-      .filter((transaction) => !transaction.reviewed || state.aiInbox.some((item) => item.transactionId === transaction.id))
+      .filter((transaction) => !transaction.reviewed || reviewSuggestionIds.has(transaction.id))
       .sort((a, b) => b.date.localeCompare(a.date))
       .slice(0, 5);
 
@@ -754,7 +1184,7 @@ export function FinanceApp() {
             <div className="flex min-h-[clamp(18rem,32vw,24rem)] items-center text-center">
               <div className="w-full">
                 <p className="font-bold text-[var(--muted)]">Net worth</p>
-                <p className="mt-1 text-4xl font-black">{usd.format(netWorth(state.accounts))}</p>
+                <p className="mt-1 text-4xl font-black">{usd.format(netWorthAmount)}</p>
                 <Chip tone="red">Down 10.59%</Chip>
                 <NetWorthDashboardChart className="mt-8 h-[clamp(9rem,16vw,13rem)] w-full" range={netWorthRange} />
                 <RangeTabs value={netWorthRange} onChange={setNetWorthRange} />
@@ -771,11 +1201,14 @@ export function FinanceApp() {
                 draft.transactions.forEach((transaction) => {
                   if (ids.has(transaction.id)) transaction.reviewed = true;
                 });
-              })}
+              }, () => bulkPatchTransactions({ updates: reviewTransactions.map((transaction) => ({ id: transaction.id, reviewed: true })) }))}
             />
           </Panel>
           <div className="space-y-6">
-            <Panel title="Top categories" action="View all" onAction={() => setUi({ view: "categories" })}>{renderTopCategories()}</Panel>
+            <Panel title="Top categories" action="View all" onAction={() => {
+              setSelectedCategoryId(null);
+              setUi({ view: "categories" });
+            }}>{renderTopCategories()}</Panel>
             <Panel title="Next two weeks" action="Recurrings" onAction={() => setUi({ view: "recurrings" })}>
               <div className="space-y-3">{state.recurrences.slice(0, 3).map(renderRecurrenceRow)}</div>
             </Panel>
@@ -786,13 +1219,6 @@ export function FinanceApp() {
   }
 
   function renderTransactions() {
-    const filtered = state.transactions
-      .filter((transaction) => !state.categoryFilter || transaction.categoryId === state.categoryFilter || transaction.splits?.some((split) => split.categoryId === state.categoryFilter))
-      .filter((transaction) => !state.search || `${transaction.name} ${transaction.merchant} ${transaction.note}`.toLowerCase().includes(state.search.toLowerCase()))
-      .sort((a, b) => b.date.localeCompare(a.date));
-    const grouped = groupTransactionsByMonth(filtered);
-    const visibleTransactionIds = filtered.map((transaction) => transaction.id);
-
     return (
       <div className="fade-in space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
@@ -810,14 +1236,27 @@ export function FinanceApp() {
           </label>
           <select className="rounded-full border border-[var(--line)] bg-[var(--surface-2)] px-4 py-3 outline-none" value={state.categoryFilter} onChange={(event) => setState({ ...state, categoryFilter: event.target.value })}>
             <option value="">All categories</option>
-            {sortedCategories(state).map((category) => <option key={category.id} value={category.id}>{category.icon} {category.name}</option>)}
+            {allSortedCategories.map((category) => <option key={category.id} value={category.id}>{category.icon} {category.name}</option>)}
           </select>
         </div>
-        {grouped.length ? (
+        {renderTransactionRegister(filteredTransactions)}
+      </div>
+    );
+  }
+
+  function renderTransactionRegister(transactions: Transaction[], options: { emptyText?: string; showFirstMonthHeader?: boolean } = {}) {
+    const groupedTransactions = groupTransactionsByMonth(transactions);
+    const visibleTransactionIds = transactions.map((transaction) => transaction.id);
+    const visibleTransactionIdSet = new Set(visibleTransactionIds);
+    const selectedVisibleTransactionIds = selectedTransactionIds.filter((id) => visibleTransactionIdSet.has(id));
+
+    return (
+      <>
+        {groupedTransactions.length ? (
           <div className="space-y-7">
-            {grouped.map((month, monthIndex) => (
+            {groupedTransactions.map((month, monthIndex) => (
               <section key={month.key} className="space-y-3">
-                {monthIndex > 0 ? (
+                {options.showFirstMonthHeader || monthIndex > 0 ? (
                   <div className="flex items-center justify-between pt-2">
                     <h3 className="text-2xl font-black tracking-tight">{month.label}</h3>
                     <span className="text-2xl font-black">{usdExact.format(month.total)}</span>
@@ -838,31 +1277,32 @@ export function FinanceApp() {
           </div>
         ) : (
           <div className="rounded-2xl border border-dashed border-[var(--line)] bg-[var(--surface)] p-8 text-center font-bold text-[var(--muted)]">
-            No transactions match this view.
+            {options.emptyText || "No transactions match this view."}
           </div>
         )}
-        {selectedTransactionIds.length ? (
+        {selectedVisibleTransactionIds.length ? (
           <BulkTransactionBar
-            selectedCount={selectedTransactionIds.length}
-            categories={sortedCategories(state)}
+            selectedCount={selectedVisibleTransactionIds.length}
+            categories={allSortedCategories}
             openMenu={bulkMenu}
             setOpenMenu={setBulkMenu}
             onClear={clearTransactionSelection}
             onSelectAll={() => setSelectedTransactionIds(visibleTransactionIds)}
-            onCategory={assignSelectedCategory}
-            onType={assignSelectedType}
-            onDelete={deleteSelectedTransactions}
+            onCategory={(categoryId) => assignSelectedCategory(categoryId, selectedVisibleTransactionIds)}
+            onType={(type) => assignSelectedType(type, selectedVisibleTransactionIds)}
+            onDelete={() => deleteSelectedTransactions(selectedVisibleTransactionIds)}
           />
         ) : null}
-      </div>
+      </>
     );
   }
 
   function renderTransactionRow(transaction: Transaction) {
-    const category = transaction.categoryId ? categoriesById.get(transaction.categoryId) : undefined;
+    const category = !transaction.internal && transaction.categoryId ? categoriesById.get(transaction.categoryId) : undefined;
     const account = accountsById.get(transaction.accountId);
-    const review = state.aiInbox.find((item) => item.transactionId === transaction.id && item.confidence < 0.9);
-    const selected = selectedTransactionIds.includes(transaction.id);
+    const review = lowConfidenceReviewByTransaction.get(transaction.id);
+    const selected = selectedTransactionIdSet.has(transaction.id);
+    const categoryPillClass = transaction.internal ? "border-blue-400/30 bg-blue-500/15 text-blue-100" : categoryTone(category);
     return (
       <div key={transaction.id} className={`transaction-row group grid grid-cols-[22px_minmax(0,1fr)_auto_auto] items-center gap-3 border-b border-[var(--line)] px-4 py-2.5 last:border-b-0 hover:bg-[var(--surface-2)] ${selected ? "bg-blue-500/18" : ""}`}>
         <input
@@ -879,25 +1319,37 @@ export function FinanceApp() {
           {transaction.excluded ? <span className="ml-2 rounded-full bg-red-500/15 px-2 py-0.5 text-xs font-black text-red-200">EXCLUDED</span> : null}
           {review ? <span className="ml-2 rounded-full bg-amber-500/15 px-2 py-0.5 text-xs font-black text-amber-200">AI REVIEW</span> : null}
         </button>
-        <button className={`category-pill rounded-full border px-3 py-1 ${categoryTone(category)}`} onClick={() => editTransactionCategory(transaction)}>
-          {category?.icon ? <span className="mr-1">{category.icon}</span> : null}{categoryLabel(category)}
+        <button className={`category-pill inline-flex items-center rounded-full border px-3 py-1 ${categoryPillClass}`} onClick={() => editTransactionCategory(transaction)}>
+          {transaction.internal ? <><ArrowDownUp size={12} className="mr-1" /> Internal transfer</> : <>{category?.icon ? <span className="mr-1">{category.icon}</span> : null}{categoryLabel(category)}</>}
         </button>
         <div className="flex items-center justify-end gap-3">
           <span className={`transaction-amount min-w-20 text-right ${transaction.amount > 0 ? "text-[var(--green)]" : ""}`}>{usdExact.format(Math.abs(transaction.amount))}</span>
           <div className="hidden items-center gap-1 opacity-0 transition group-hover:flex group-hover:opacity-100">
             <IconButton label="Split" onClick={() => splitTransaction(transaction)}>S</IconButton>
-            <IconButton label="Create rule" onClick={() => openRule(undefined, transaction.name)}><Flag size={14} /></IconButton>
-            <IconButton label="Exclude" onClick={() => commit((draft) => {
-              const target = draft.transactions.find((item) => item.id === transaction.id);
-              if (target) target.excluded = !target.excluded;
-            })}>X</IconButton>
-            <IconButton label="Internal transfer" onClick={() => commit((draft) => {
-              const target = draft.transactions.find((item) => item.id === transaction.id);
-              if (target) {
-                target.internal = !target.internal;
-                if (target.internal) target.excluded = true;
-              }
-            })}><ArrowDownUp size={14} /></IconButton>
+            <IconButton label="Create rule" onClick={() => openRule(undefined, transaction.merchant || transaction.name, {
+              categoryId: transaction.internal ? null : transaction.categoryId || state.categories[0]?.id || "",
+              internal: transaction.internal
+            })}><Flag size={14} /></IconButton>
+            <IconButton label="Exclude" onClick={() => {
+              const excluded = !transaction.excluded;
+              commit((draft) => {
+                const target = draft.transactions.find((item) => item.id === transaction.id);
+                if (target) target.excluded = excluded;
+              }, () => patchTransaction(transaction.id, { excluded }));
+            }}>X</IconButton>
+            <IconButton label="Internal transfer" onClick={() => {
+              const internal = !transaction.internal;
+              const excluded = internal ? true : transaction.excluded;
+              const categoryId = internal ? null : defaultCategoryIdForTransaction({ ...transaction, internal: false, excluded });
+              commit((draft) => {
+                const target = draft.transactions.find((item) => item.id === transaction.id);
+                if (target) {
+                  target.internal = internal;
+                  target.categoryId = categoryId;
+                  if (target.internal) target.excluded = true;
+                }
+              }, () => patchTransaction(transaction.id, { internal, excluded, ...(internal ? { categoryId } : {}) }));
+            }}><ArrowDownUp size={14} /></IconButton>
           </div>
         </div>
       </div>
@@ -905,61 +1357,160 @@ export function FinanceApp() {
   }
 
   function renderCategories() {
+    if (selectedCategory) return renderCategoryTransactions(selectedCategory);
+
     return (
-      <div className="fade-in">
-        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-          <h2 className="text-xl font-black">Budgets</h2>
-          <Button onClick={() => openCategoryModal()}><Plus size={16} /> Category</Button>
+      <div className="fade-in space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <ChevronDown size={16} className="text-blue-300" />
+            <h2 className="text-xl font-black">Regular categories</h2>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button onClick={() => openGroupModal()}><Plus size={16} /> Group</Button>
+            <Button onClick={() => openCategoryModal()}><Plus size={16} /> Category</Button>
+          </div>
         </div>
-        <div className="space-y-4">{sortedGroups(state).map(renderBudgetGroup)}</div>
+        <div className="hidden px-4 text-xs font-black uppercase text-blue-300/80 md:grid md:grid-cols-[minmax(220px,1.3fr)_90px_minmax(180px,1fr)_90px_92px] md:items-center">
+          <div />
+          <div className="text-right">Spent</div>
+          <div />
+          <div className="text-right">Budget</div>
+          <div />
+        </div>
+        <div className="space-y-3">{sortedBudgetGroups.map(renderBudgetGroup)}</div>
+      </div>
+    );
+  }
+
+  function renderCategoryTransactions(category: BudgetCategory) {
+    const categoryTransactions = [...state.transactions]
+      .filter((transaction) => transactionHasCategory(transaction, category.id))
+      .sort((a, b) => b.date.localeCompare(a.date));
+    const activeMonth = budgetMonthKey;
+    const monthTransactions = categoryTransactions.filter((transaction) => transactionMonthKey(transaction) === activeMonth);
+    const monthSpent = categorySpendForTransactions(monthTransactions, category.id);
+    const recurring = recurringAmountFromMap(recurringByCategory, category.id);
+    const remaining = category.budget - monthSpent;
+
+    return (
+      <div className="fade-in space-y-5">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <button type="button" className="mb-3 inline-flex items-center gap-2 text-sm font-black text-blue-300 hover:text-blue-100" onClick={closeCategoryTransactions}>
+              <ChevronRight size={14} className="rotate-180" /> Categories
+            </button>
+            <div className="flex items-center gap-3">
+              <span className="grid h-11 w-11 place-items-center rounded-xl bg-[var(--surface-2)] text-xl">{category.icon}</span>
+              <div>
+                <h2 className="text-2xl font-black tracking-tight">{category.name}</h2>
+                <div className="text-sm font-bold text-[var(--muted)]">{formatMonthKey(activeMonth)}</div>
+              </div>
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <span className="rounded-full border border-[var(--line)] bg-[var(--surface-2)] px-4 py-2.5 text-sm font-black">{formatMonthKey(activeMonth)}</span>
+            <Button variant="secondary" onClick={() => openCategoryModal(category)}><Edit3 size={16} /> Edit</Button>
+          </div>
+        </div>
+
+        <section className="premium-panel p-5">
+          <div className="grid gap-4 md:grid-cols-[1fr_1fr_1fr]">
+            <Metric label="Spent" value={usdExact.format(monthSpent)} tone={monthSpent > category.budget && category.budget > 0 ? "red" : "green"} />
+            <Metric label="Budget" value={usdExact.format(category.budget)} />
+            <Metric label={remaining >= 0 ? "Remaining" : "Over"} value={usdExact.format(Math.abs(remaining))} tone={remaining >= 0 ? "green" : "red"} />
+          </div>
+          <div className="mt-5"><Progress spent={monthSpent} budget={category.budget} recurring={recurring} /></div>
+        </section>
+
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <h3 className="text-xl font-black">Transactions</h3>
+          <div className="flex gap-2">
+            <Button variant="secondary" onClick={detectTransfers}><ArrowDownUp size={16} /> Detect transfers</Button>
+            <Button variant="secondary" onClick={applyRules}><Flag size={16} /> Apply rules</Button>
+            <Button variant="secondary" onClick={approveHighConfidenceAi}><Sparkles size={16} /> Apply AI</Button>
+          </div>
+        </div>
+
+        <label className="flex items-center gap-2 rounded-full border border-[var(--line)] bg-[var(--surface-2)] px-4">
+          <Search size={16} className="text-[var(--muted)]" />
+          <input className="w-full bg-transparent py-3 outline-none" placeholder="Search merchants or notes" value={state.search} onChange={(event) => setState({ ...state, search: event.target.value })} />
+        </label>
+
+        {renderTransactionRegister(
+          monthTransactions.filter((transaction) => {
+            const search = state.search.toLowerCase();
+            return !search || `${transaction.name} ${transaction.merchant} ${transaction.note}`.toLowerCase().includes(search);
+          }),
+          { emptyText: "No transactions in this category for this month.", showFirstMonthHeader: false }
+        )}
       </div>
     );
   }
 
   function renderBudgetGroup(group: BudgetGroup) {
-    const totals = groupTotals(state, group.id);
+    const totals = groupTotalsFromMap(state.categories, spendByCategory, group.id);
+    const groupCategories = categoriesByGroup.get(group.id) || [];
+    const groupRecurring = groupRecurringAmountFromMap(state.categories, recurringByCategory, group.id);
     return (
       <section key={group.id} className="space-y-1">
-        <div className="compact-panel grid gap-3 p-4 md:grid-cols-[minmax(220px,1.3fr)_90px_minmax(170px,.9fr)_90px_120px] md:items-center">
+        <div className="grid gap-3 rounded-lg px-4 py-2 md:grid-cols-[minmax(220px,1.3fr)_90px_minmax(180px,1fr)_90px_92px] md:items-center">
           <button className="flex items-center gap-2 text-left font-black" onClick={() => commit((draft) => {
             const target = draft.groups.find((item) => item.id === group.id);
             if (target) target.expanded = !target.expanded;
           })}>
             {group.expanded ? <ChevronDown size={16} style={{ color: group.color }} /> : <ChevronRight size={16} style={{ color: group.color }} />}
+            <span className="grid min-w-5 place-items-center rounded-md px-1.5 py-0.5 text-xs text-white" style={{ background: group.color }}>{groupCategories.length}</span>
             {group.name}
           </button>
           <div className="text-right font-black">{usd.format(totals.spent)}</div>
-          <Progress spent={totals.spent} budget={totals.budget} color={group.color} />
+          <Progress spent={totals.spent} budget={totals.budget} recurring={groupRecurring} />
           <div className="text-right font-black">{usd.format(totals.budget)}</div>
           <div />
         </div>
-        {group.expanded ? sortedCategories(state, group.id).map((category) => {
-          const spent = categorySpent(state, category.id);
-          return (
-            <div key={category.id} className="grid gap-3 border-b border-[color:var(--line)] px-4 py-3 md:grid-cols-[minmax(220px,1.3fr)_90px_minmax(170px,.9fr)_90px_120px] md:items-center">
-              <div className="flex min-w-0 items-center gap-3">
-                <span className="h-2.5 w-2.5 rounded-full" style={{ background: group.color }} />
-                <span className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-[var(--surface-2)]">{category.icon}</span>
-                <span className="truncate font-bold">{category.name}</span>
-              </div>
-              <div className="text-right font-black">{usd.format(spent)}</div>
-              <Progress spent={spent} budget={category.budget} color={spent > category.budget && category.budget > 0 ? "var(--red)" : "var(--lime)"} />
-              <div className="text-right font-black">{usd.format(category.budget)}</div>
-              <div className="flex justify-end gap-2">
-                <IconButton label="Edit" onClick={() => openCategoryModal(category)}><Edit3 size={14} /></IconButton>
-                <IconButton label="Delete" onClick={() => commit((draft) => {
-                  draft.categories = draft.categories.filter((item) => item.id !== category.id);
-                })}><Trash2 size={14} /></IconButton>
-              </div>
-            </div>
-          );
-        }) : null}
+        {group.expanded ? (
+          <div className="ml-6 space-y-1 border-l pl-3" style={{ borderColor: group.color }}>
+            {groupCategories.map((category) => {
+              const spent = categorySpentFromMap(spendByCategory, category.id);
+              const recurring = recurringAmountFromMap(recurringByCategory, category.id);
+              return (
+                <div
+                  key={category.id}
+                  role="button"
+                  tabIndex={0}
+                  className="group/category grid cursor-pointer gap-3 rounded-lg px-3 py-2 transition hover:bg-[var(--selected-soft)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-400 md:grid-cols-[minmax(190px,1.3fr)_90px_minmax(180px,1fr)_90px_92px] md:items-center"
+                  onClick={() => openCategoryTransactions(category)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      openCategoryTransactions(category);
+                    }
+                  }}
+                >
+                  <div className="flex min-w-0 items-center gap-3">
+                    <span className="grid h-7 w-7 shrink-0 place-items-center rounded-md bg-[var(--surface-2)]">{category.icon}</span>
+                    <span className="truncate font-bold">{category.name}</span>
+                  </div>
+                  <div className="text-right font-black">{usd.format(spent)}</div>
+                  <Progress spent={spent} budget={category.budget} recurring={recurring} />
+                  <div className="text-right font-black">{usd.format(category.budget)}</div>
+                  <div className="flex justify-end gap-2 opacity-0 transition group-hover/category:opacity-100">
+                    <IconButton label="Edit" onClick={() => openCategoryModal(category)}><Edit3 size={14} /></IconButton>
+                    <IconButton label="Delete" onClick={() => commit((draft) => {
+                      draft.categories = draft.categories.filter((item) => item.id !== category.id);
+                    })}><Trash2 size={14} /></IconButton>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        ) : null}
       </section>
     );
   }
 
   function renderAccounts() {
-    const worth = netWorth(state.accounts);
+    const worth = netWorthAmount;
     return (
       <div className="fade-in space-y-8">
         <div className="flex flex-wrap items-center justify-between gap-3">
@@ -992,9 +1543,7 @@ export function FinanceApp() {
     const groupLabel = group === "Credit card" ? "Credit cards" : group;
     return (
       <section key={group} className="space-y-3">
-        <button className="flex items-center gap-2 text-left text-base font-black" onClick={() => commit((draft) => {
-          draft.accountGroupsOpen[group] = !draft.accountGroupsOpen[group];
-        })}>
+        <button className="flex items-center gap-2 text-left text-base font-black" onClick={() => toggleAccountGroup(group)}>
           {state.accountGroupsOpen[group] ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
           {groupLabel}
         </button>
@@ -1018,7 +1567,7 @@ export function FinanceApp() {
         <div className="flex min-w-0 items-center gap-3">
           <AccountLogo account={account} />
           <div className="min-w-0">
-            <div className="truncate font-black">{account.name} <span className="ml-2 font-bold text-blue-300/70">{account.last4}</span></div>
+            <div className="truncate font-black">{accountDisplayName(account)}{account.last4 ? <span className="ml-2 font-bold text-blue-300/70">{account.last4}</span> : null}</div>
             <div className="text-sm font-bold text-blue-300/75">11 hours ago</div>
           </div>
         </div>
@@ -1045,7 +1594,7 @@ export function FinanceApp() {
         </Panel>
         <div className="space-y-3">{investments.map((account) => (
           <div key={account.id} className="compact-panel grid gap-3 p-4 md:grid-cols-[1fr_auto_auto] md:items-center">
-            <div className="font-black">{account.name} <span className="text-[var(--muted)]">{account.last4}</span></div>
+            <div className="font-black">{accountDisplayName(account)}{account.last4 ? <span className="ml-2 text-blue-300/70">{account.last4}</span> : null}</div>
             <Chip tone={account.change >= 0 ? "green" : "red"}>{account.change >= 0 ? "Up" : "Down"} {Math.abs(account.change)}%</Chip>
             <div className="font-black">{usdExact.format(account.balance)}</div>
           </div>
@@ -1117,7 +1666,7 @@ export function FinanceApp() {
           </div>
           <Chip tone={goal.status === "Active" ? "green" : "blue"}>{goal.status}</Chip>
         </div>
-        <div className="mt-5"><Progress spent={current} budget={goal.targetAmount} color="var(--green)" /></div>
+        <div className="mt-5"><Progress spent={current} budget={goal.targetAmount} color="var(--green)" mode="solid" /></div>
         <div className="mt-4 grid gap-3 md:grid-cols-3">
           <Metric label="Complete" value={`${Math.round(percent(current, goal.targetAmount))}%`} />
           <Metric label="Remaining" value={usdExact.format(remaining)} tone="orange" />
@@ -1141,14 +1690,17 @@ export function FinanceApp() {
           </div>
         </div>
         <div className="space-y-3">{state.rules.map((rule) => {
-          const category = categoriesById.get(rule.categoryId);
+          const category = rule.categoryId ? categoriesById.get(rule.categoryId) : undefined;
           return (
             <div key={rule.id} className="compact-panel grid gap-3 p-4 md:grid-cols-[1fr_auto] md:items-center">
               <div>
                 <div className="font-black">If transaction {rule.matchType === "exact" ? "exactly matches" : "contains"} &quot;{rule.pattern}&quot;</div>
-                <div className="text-sm text-[var(--muted)]">Set category to {category ? `${category.icon} ${category.name}` : "Uncategorized"}</div>
+                <div className="text-sm text-[var(--muted)]">
+                  {rule.internal ? "Mark as Internal transfer" : `Set category to ${category ? `${category.icon} ${category.name}` : "Uncategorized"}`}
+                </div>
               </div>
               <div className="flex items-center justify-end gap-2">
+                {rule.internal ? <Chip tone="blue">Internal</Chip> : null}
                 <Chip tone={rule.enabled ? "green" : "red"}>{rule.enabled ? "Enabled" : "Paused"}</Chip>
                 <IconButton label="Edit rule" onClick={() => openRule(rule)}><Edit3 size={14} /></IconButton>
                 <IconButton label="Delete rule" onClick={() => commit((draft) => {
@@ -1165,13 +1717,14 @@ export function FinanceApp() {
   function renderTopCategories() {
     return (
       <div className="space-y-2">
-        {sortedGroups(state).map((group) => {
-          const totals = groupTotals(state, group.id);
+        {sortedBudgetGroups.map((group) => {
+          const totals = groupTotalsFromMap(state.categories, spendByCategory, group.id);
+          const recurring = groupRecurringAmountFromMap(state.categories, recurringByCategory, group.id);
           return (
             <div key={group.id} className="grid gap-3 rounded-2xl border border-[var(--line)] bg-[var(--surface)] p-3 md:grid-cols-[minmax(150px,1fr)_90px_minmax(160px,1fr)_90px] md:items-center">
               <div className="flex items-center gap-2 font-black"><ChevronRight size={14} style={{ color: group.color }} />{group.name}</div>
               <div className="text-right font-black">{usd.format(totals.spent)}</div>
-              <Progress spent={totals.spent} budget={totals.budget} color={group.color} />
+              <Progress spent={totals.spent} budget={totals.budget} recurring={recurring} />
               <div className="text-right font-black">{usd.format(totals.budget)}</div>
             </div>
           );
@@ -1487,11 +2040,45 @@ function pointPair(point: { x: number; y: number }) {
   return `${point.x},${point.y}`;
 }
 
-function Progress({ spent, budget, color }: { spent: number; budget: number; color: string }) {
+function progressHealthColor(spent: number, budget: number) {
+  if (budget <= 0 && spent > 0) return "var(--red)";
+  if (budget <= 0) return "var(--green)";
+
+  const ratio = spent / budget;
+  if (ratio >= 1) return "var(--red)";
+  if (ratio >= 0.92) return "#f97316";
+  if (ratio >= 0.8) return "#fbbf24";
+  if (ratio >= 0.65) return "#84cc16";
+  return "var(--green)";
+}
+
+function Progress({
+  spent,
+  budget,
+  color,
+  recurring = 0,
+  mode = "health"
+}: {
+  spent: number;
+  budget: number;
+  color?: string;
+  recurring?: number;
+  mode?: "health" | "solid";
+}) {
   const value = percent(spent, budget);
+  const recurringValue = percent(recurring, budget);
+  const recurringPaidValue = percent(Math.min(spent, recurring), budget);
+  const showRecurring = recurring > 0 && budget > 0;
+  const barColor = mode === "health" ? progressHealthColor(spent, budget) : color || "var(--green)";
   return (
-    <div className="progress-track" style={progressStyle(value, color)}>
+    <div className={`progress-track ${showRecurring ? "has-recurring" : ""}`} style={progressStyle(value, barColor, recurringValue, recurringPaidValue)}>
       <span className={`progress-fill ${value > 100 ? "over" : ""}`} />
+      {showRecurring ? (
+        <>
+          <span className="progress-recurring-paid" />
+          <span className="progress-recurring-outline" />
+        </>
+      ) : null}
     </div>
   );
 }
@@ -1539,7 +2126,7 @@ function Chip({ tone, children }: { tone?: "green" | "blue" | "red"; children: R
 }
 
 function AccountLogo({ account }: { account: Account }) {
-  const label = account.name.slice(0, 1).toUpperCase();
+  const label = accountDisplayName(account).slice(0, 1).toUpperCase();
   return (
     <span className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-gradient-to-br from-sky-500 to-blue-950 text-sm font-black text-white shadow-soft">
       {label}
@@ -1586,7 +2173,10 @@ function Button({ children, variant = "primary", onClick }: { children: React.Re
 
 function IconButton({ label, children, onClick }: { label: string; children: React.ReactNode; onClick: () => void }) {
   return (
-    <button title={label} aria-label={label} className="grid min-h-8 min-w-8 place-items-center rounded-full border border-[var(--line)] bg-[var(--surface-2)] px-2 text-xs font-black transition hover:-translate-y-0.5 hover:bg-[var(--surface-3)]" onClick={onClick}>
+    <button title={label} aria-label={label} className="grid min-h-8 min-w-8 place-items-center rounded-full border border-[var(--line)] bg-[var(--surface-2)] px-2 text-xs font-black transition hover:-translate-y-0.5 hover:bg-[var(--surface-3)]" onClick={(event) => {
+      event.stopPropagation();
+      onClick();
+    }}>
       {children}
     </button>
   );
@@ -1679,43 +2269,156 @@ function BulkTransactionBar({
   );
 }
 
-function RuleModal({ draft, categories, setDraft, onClose, onSave }: { draft: RuleDraft; categories: BudgetCategory[]; setDraft: (draft: RuleDraft | null) => void; onClose: () => void; onSave: (event: FormEvent) => void }) {
+function RuleModal({
+  draft,
+  categories,
+  accounts,
+  transactions,
+  setDraft,
+  onClose,
+  onSave
+}: {
+  draft: RuleDraft;
+  categories: BudgetCategory[];
+  accounts: Account[];
+  transactions: Transaction[];
+  setDraft: (draft: RuleDraft | null) => void;
+  onClose: () => void;
+  onSave: (event: FormEvent) => void;
+}) {
+  const categoriesById = useMemo(() => new Map(categories.map((category) => [category.id, category])), [categories]);
+  const accountsById = useMemo(() => new Map(accounts.map((account) => [account.id, account])), [accounts]);
+  const matchingTransactions = useMemo(() => (
+    transactions
+      .filter((transaction) => transactionMatchesRuleDraft(draft, transaction))
+      .sort((a, b) => b.date.localeCompare(a.date))
+  ), [draft, transactions]);
+  const actionLabel = ruleActionLabel(draft, categoriesById);
+  const canSave = Boolean(draft.pattern.trim() && (draft.internal || draft.categoryId));
+
   return (
     <div className="fixed inset-0 z-50 grid place-items-center bg-black/60 p-4 backdrop-blur-sm" onMouseDown={(event) => {
       if (event.target === event.currentTarget) onClose();
     }}>
-      <form className="w-[min(520px,calc(100vw-2rem))] rounded-2xl border border-[var(--line)] bg-[var(--surface)] p-5 shadow-soft" onSubmit={onSave}>
+      <form className="max-h-[calc(100vh-2rem)] w-[min(760px,calc(100vw-2rem))] overflow-hidden rounded-2xl border border-[var(--line)] bg-[var(--surface)] shadow-soft" onSubmit={onSave}>
         <div className="mb-5 flex items-center justify-between">
-          <h2 className="text-lg font-black">{draft.id ? "Edit rule" : "New rule"}</h2>
-          <button type="button" onClick={onClose}><X size={18} /></button>
+          <div className="px-5 pt-5">
+            <p className="text-xs font-black uppercase tracking-normal text-blue-300/80">{draft.id ? "Edit rule" : `New rule for ${actionLabel}`}</p>
+            <h2 className="mt-1 text-xl font-black">Apply this rule to matching transactions</h2>
+          </div>
+          <button className="mr-5 mt-5 grid h-9 w-9 place-items-center rounded-full border border-[var(--line)] bg-[var(--surface-2)] text-[var(--muted)] hover:text-[var(--text)]" type="button" onClick={onClose}><X size={18} /></button>
         </div>
-        <div className="grid gap-4">
-          <Label title="Merchant text">
-            <input className="w-full rounded-xl border border-[var(--line)] bg-[var(--surface-2)] px-3 py-2 outline-none" value={draft.pattern} onChange={(event) => setDraft({ ...draft, pattern: event.target.value })} />
-          </Label>
-          <Label title="Match type">
-            <select className="w-full rounded-xl border border-[var(--line)] bg-[var(--surface-2)] px-3 py-2 outline-none" value={draft.matchType} onChange={(event) => setDraft({ ...draft, matchType: event.target.value as MerchantRule["matchType"] })}>
-              <option value="exact">Exactly matches</option>
-              <option value="contains">Contains</option>
-            </select>
-          </Label>
-          <Label title="Category">
-            <select className="w-full rounded-xl border border-[var(--line)] bg-[var(--surface-2)] px-3 py-2 outline-none" value={draft.categoryId} onChange={(event) => setDraft({ ...draft, categoryId: event.target.value })}>
-              {categories.map((category) => <option key={category.id} value={category.id}>{category.icon} {category.name}</option>)}
-            </select>
-          </Label>
-          <label className="flex items-center gap-3 font-black">
-            <input type="checkbox" checked={draft.enabled} onChange={(event) => setDraft({ ...draft, enabled: event.target.checked })} />
-            Enabled
-          </label>
+        <div className="grid max-h-[calc(100vh-12rem)] gap-5 overflow-y-auto px-5 pb-5 soft-scrollbar">
+          <div className="grid gap-4 rounded-2xl border border-[var(--line)] bg-[var(--surface-2)] p-4">
+            <div className="grid gap-4 md:grid-cols-[1fr_220px]">
+              <Label title="Merchant text">
+                <input className="w-full rounded-xl border border-[var(--line)] bg-[var(--surface)] px-3 py-2 text-base font-black text-[var(--text)] outline-none" value={draft.pattern} onChange={(event) => setDraft({ ...draft, pattern: event.target.value })} />
+              </Label>
+              <Label title="Action">
+                <select
+                  className="w-full rounded-xl border border-[var(--line)] bg-[var(--surface)] px-3 py-2 outline-none"
+                  value={draft.internal ? INTERNAL_TRANSFER_ACTION : draft.categoryId || ""}
+                  onChange={(event) => {
+                    const value = event.target.value;
+                    setDraft(value === INTERNAL_TRANSFER_ACTION ? { ...draft, categoryId: null, internal: true } : { ...draft, categoryId: value, internal: false });
+                  }}
+                >
+                  <option value={INTERNAL_TRANSFER_ACTION}>Internal transfer</option>
+                  {!categories.length ? <option value="">No categories yet</option> : null}
+                  {categories.map((category) => <option key={category.id} value={category.id}>{category.icon} {category.name}</option>)}
+                </select>
+              </Label>
+            </div>
+            <div className="grid gap-3 md:grid-cols-[1fr_auto] md:items-center">
+              <div className="grid grid-cols-2 rounded-full border border-[var(--line)] bg-[var(--surface)] p-1">
+                {[
+                  { value: "exact", label: "Exact match" },
+                  { value: "contains", label: "Partial match" }
+                ].map((item) => (
+                  <button
+                    key={item.value}
+                    type="button"
+                    className={`rounded-full px-4 py-2 text-sm font-black transition ${draft.matchType === item.value ? "bg-[var(--pill)] text-white shadow-soft" : "text-[var(--muted)] hover:text-[var(--text)]"}`}
+                    onClick={() => setDraft({ ...draft, matchType: item.value as MerchantRule["matchType"] })}
+                  >
+                    {item.label}
+                  </button>
+                ))}
+              </div>
+              <label className="flex items-center gap-3 rounded-full border border-[var(--line)] bg-[var(--surface)] px-4 py-2 font-black">
+                <input type="checkbox" checked={draft.enabled} onChange={(event) => setDraft({ ...draft, enabled: event.target.checked })} />
+                Enabled
+              </label>
+            </div>
+          </div>
+
+          <div className="grid gap-3">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <div className="text-sm font-black text-blue-300">{matchingTransactions.length} matching transaction{matchingTransactions.length === 1 ? "" : "s"}</div>
+                <div className="text-xs font-bold text-[var(--muted)]">{draft.enabled ? "These will be updated when you create the rule." : "Preview only while this rule is paused."}</div>
+              </div>
+              <RuleActionChip draft={draft} categoriesById={categoriesById} />
+            </div>
+            <div className="overflow-hidden rounded-2xl border border-[var(--line)] bg-[var(--surface-2)]">
+              {matchingTransactions.length ? matchingTransactions.map((transaction) => (
+                <RulePreviewTransaction key={transaction.id} transaction={transaction} category={transaction.categoryId ? categoriesById.get(transaction.categoryId) : undefined} account={accountsById.get(transaction.accountId)} />
+              )) : (
+                <div className="p-5 text-center text-sm font-bold text-[var(--muted)]">
+                  No past transactions match this rule yet.
+                </div>
+              )}
+            </div>
+          </div>
         </div>
-        <div className="mt-6 flex justify-end gap-2">
-          <Button variant="secondary" onClick={onClose}>Cancel</Button>
-          <button className="rounded-full bg-[var(--pill)] px-4 py-2.5 text-sm font-black text-white" type="submit">Save rule</button>
+        <div className="flex flex-wrap items-center justify-end gap-3 border-t border-[var(--line)] bg-[var(--surface)] p-5">
+          <Button variant="secondary" onClick={onClose}>{draft.id ? "Cancel" : "No thanks"}</Button>
+          <button className={`rounded-full px-5 py-2.5 text-sm font-black text-white transition ${canSave ? "bg-[var(--pill)] shadow-soft hover:-translate-y-0.5" : "cursor-not-allowed bg-slate-600/60"}`} type="submit" disabled={!canSave}>
+            {draft.id ? "Save rule" : "Create rule"}
+          </button>
         </div>
       </form>
     </div>
   );
+}
+
+function RuleActionChip({ draft, categoriesById }: { draft: RuleDraft; categoriesById: Map<string, BudgetCategory> }) {
+  const category = draft.categoryId ? categoriesById.get(draft.categoryId) : undefined;
+  if (draft.internal) {
+    return (
+      <span className="inline-flex items-center gap-2 rounded-full border border-blue-400/25 bg-blue-500/15 px-3 py-1.5 text-xs font-black text-blue-100">
+        <ArrowDownUp size={13} /> Internal transfer
+      </span>
+    );
+  }
+
+  return (
+    <span className="inline-flex items-center gap-2 rounded-full border border-blue-400/25 bg-blue-500/15 px-3 py-1.5 text-xs font-black text-blue-100">
+      {category?.icon ? <span>{category.icon}</span> : null}{category?.name || "Uncategorized"}
+    </span>
+  );
+}
+
+function RulePreviewTransaction({ transaction, category, account }: { transaction: Transaction; category?: BudgetCategory; account?: Account }) {
+  const transactionCategory = transaction.internal ? undefined : category;
+  const tone = transaction.internal ? "border-blue-400/25 bg-blue-500/15 text-blue-100" : categoryTone(transactionCategory);
+  return (
+    <div className="grid gap-3 border-b border-[var(--line)] px-4 py-3 last:border-b-0 md:grid-cols-[76px_minmax(0,1fr)_auto_96px] md:items-center">
+      <div className="text-sm font-black text-[var(--muted)]">{formatRulePreviewDate(transaction.date)}</div>
+      <div className="min-w-0">
+        <div className="truncate font-black">{transaction.name}</div>
+        <div className="truncate text-xs font-bold text-blue-300/70">{accountSource(account)}</div>
+      </div>
+      <span className={`inline-flex max-w-full items-center justify-self-start rounded-full border px-3 py-1 text-xs font-black md:justify-self-end ${tone}`}>
+        {transaction.internal ? <><ArrowDownUp size={12} className="mr-1" /> Internal</> : <>{transactionCategory?.icon ? <span className="mr-1">{transactionCategory.icon}</span> : null}{categoryLabel(transactionCategory)}</>}
+      </span>
+      <div className="text-right font-black">{usdExact.format(Math.abs(transaction.amount))}</div>
+    </div>
+  );
+}
+
+function formatRulePreviewDate(value: string) {
+  return parseLocalDate(value).toLocaleDateString("en-US", { month: "short", day: "numeric" });
 }
 
 function TransactionModal({ transaction, accounts, categories, onClose, onSave }: { transaction: Transaction; accounts: Account[]; categories: BudgetCategory[]; onClose: () => void; onSave: (transaction: Transaction) => void }) {
@@ -1744,18 +2447,26 @@ function TransactionModal({ transaction, accounts, categories, onClose, onSave }
           </div>
           <Label title="Account">
             <select className="w-full rounded-xl border border-[var(--line)] bg-[var(--surface-2)] px-3 py-2 outline-none" value={draft.accountId} onChange={(event) => setDraft({ ...draft, accountId: event.target.value })}>
-              {accounts.map((account) => <option key={account.id} value={account.id}>{account.name} {account.last4}</option>)}
+              {accounts.map((account) => <option key={account.id} value={account.id}>{accountDisplayName(account)} {account.last4}</option>)}
             </select>
           </Label>
           <Label title="Category">
-            <select className="w-full rounded-xl border border-[var(--line)] bg-[var(--surface-2)] px-3 py-2 outline-none" value={draft.categoryId || ""} onChange={(event) => setDraft({ ...draft, categoryId: event.target.value || null })}>
+            <select
+              className="w-full rounded-xl border border-[var(--line)] bg-[var(--surface-2)] px-3 py-2 outline-none"
+              value={draft.internal ? INTERNAL_TRANSFER_ACTION : draft.categoryId || ""}
+              onChange={(event) => {
+                const value = event.target.value;
+                setDraft(value === INTERNAL_TRANSFER_ACTION ? { ...draft, categoryId: null, internal: true, excluded: true } : { ...draft, categoryId: value || null, internal: false });
+              }}
+            >
               <option value="">Uncategorized</option>
+              <option value={INTERNAL_TRANSFER_ACTION}>Internal transfer</option>
               {categories.map((category) => <option key={category.id} value={category.id}>{category.icon} {category.name}</option>)}
             </select>
           </Label>
           <div className="grid gap-3 rounded-xl border border-[var(--line)] bg-[var(--surface-2)] p-3">
             <label className="flex items-center gap-3 font-black"><input type="checkbox" checked={draft.excluded} onChange={(event) => setDraft({ ...draft, excluded: event.target.checked })} /> Exclude from spending</label>
-            <label className="flex items-center gap-3 font-black"><input type="checkbox" checked={draft.internal} onChange={(event) => setDraft({ ...draft, internal: event.target.checked, excluded: event.target.checked ? true : draft.excluded })} /> Internal transfer</label>
+            <label className="flex items-center gap-3 font-black"><input type="checkbox" checked={draft.internal} onChange={(event) => setDraft({ ...draft, internal: event.target.checked, categoryId: event.target.checked ? null : draft.categoryId, excluded: event.target.checked ? true : draft.excluded })} /> Internal transfer</label>
           </div>
         </div>
         <ModalFooter onClose={onClose} submitLabel="Save transaction" />
@@ -1793,6 +2504,33 @@ function CategoryModal({ draft, groups, setDraft, onClose, onSave }: { draft: Ca
           </Label>
         </div>
         <ModalFooter onClose={onClose} submitLabel="Save category" />
+      </form>
+    </div>
+  );
+}
+
+function GroupModal({ draft, setDraft, onClose, onSave }: { draft: GroupDraft; setDraft: (draft: GroupDraft | null) => void; onClose: () => void; onSave: (draft: GroupDraft) => void }) {
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center bg-black/60 p-4 backdrop-blur-sm" onMouseDown={(event) => {
+      if (event.target === event.currentTarget) onClose();
+    }}>
+      <form className="w-[min(480px,calc(100vw-2rem))] rounded-2xl border border-[var(--line)] bg-[var(--surface)] p-5 shadow-soft" onSubmit={(event) => {
+        event.preventDefault();
+        onSave(draft);
+      }}>
+        <ModalHeader title={draft.id ? "Edit group" : "New group"} onClose={onClose} />
+        <div className="grid gap-4">
+          <Label title="Name">
+            <input className="w-full rounded-xl border border-[var(--line)] bg-[var(--surface-2)] px-3 py-2 outline-none" value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} />
+          </Label>
+          <Label title="Color">
+            <div className="flex items-center gap-3 rounded-xl border border-[var(--line)] bg-[var(--surface-2)] px-3 py-2">
+              <input className="h-9 w-12 rounded-lg border border-[var(--line)] bg-transparent" type="color" value={draft.color} onChange={(event) => setDraft({ ...draft, color: event.target.value })} />
+              <input className="min-w-0 flex-1 bg-transparent font-black outline-none" value={draft.color} onChange={(event) => setDraft({ ...draft, color: event.target.value })} />
+            </div>
+          </Label>
+        </div>
+        <ModalFooter onClose={onClose} submitLabel="Save group" />
       </form>
     </div>
   );
@@ -1885,6 +2623,7 @@ function Label({ title, children }: { title: string; children: React.ReactNode }
 function SettingsModal({
   activeTab,
   state,
+  plaidStatus,
   categories,
   setActiveTab,
   setState,
@@ -1897,6 +2636,7 @@ function SettingsModal({
 }: {
   activeTab: SettingsTab;
   state: FinanceState;
+  plaidStatus: PlaidStatus | null;
   categories: BudgetCategory[];
   setActiveTab: (tab: SettingsTab) => void;
   setState: (updater: (current: FinanceState) => FinanceState) => void;
@@ -1907,12 +2647,6 @@ function SettingsModal({
   onDeleteRule: (ruleId: string) => void;
   onToggleRule: (ruleId: string) => void;
 }) {
-  const connectedInstitutions = [
-    { name: "Capital One", linked: "Linked Apr 30, 2025", count: "12 accounts", icon: "CO" },
-    { name: "Charles Schwab", linked: "Linked Apr 30, 2025", count: "2 accounts", icon: "CS" },
-    { name: "Fidelity", linked: "Linked Jan 18, 2026", count: "2 accounts", icon: "FI" }
-  ];
-
   const content = {
     general: (
       <div className="space-y-9">
@@ -1941,18 +2675,27 @@ function SettingsModal({
     connections: (
       <SettingsSection title="Connections" action={<button className="flex items-center gap-2 font-black text-blue-300" onClick={onConnect}><Plus size={16} /> New</button>}>
         <div className="space-y-3">
-          {connectedInstitutions.map((institution) => (
-            <button key={institution.name} className="flex w-full items-center justify-between gap-4 rounded-2xl p-2 text-left transition hover:bg-[var(--surface-2)]">
+          <div className="grid gap-3 rounded-2xl border border-[var(--line)] bg-[var(--surface-2)] p-4 text-sm font-bold text-blue-200 md:grid-cols-3">
+            <span>Plaid {plaidStatus?.configured ? "configured" : "not configured"}</span>
+            <span>{plaidStatus?.env || "sandbox"}</span>
+            <span>{plaidStatus?.transactionCount ?? 0} synced transactions</span>
+          </div>
+          {plaidStatus?.items.length ? plaidStatus.items.map((institution) => (
+            <button key={institution.itemId} className="flex w-full items-center justify-between gap-4 rounded-2xl p-2 text-left transition hover:bg-[var(--surface-2)]">
               <span className="flex min-w-0 items-center gap-3">
-                <span className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-blue-500/25 text-xs font-black text-blue-100">{institution.icon}</span>
+                <span className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-blue-500/25 text-xs font-black text-blue-100">{institution.institution.slice(0, 2).toUpperCase()}</span>
                 <span className="min-w-0">
-                  <span className="block truncate font-black">{institution.name}</span>
-                  <span className="block text-sm font-bold text-blue-300/80">{institution.linked}</span>
+                  <span className="block truncate font-black">{institution.institution}</span>
+                  <span className="block text-sm font-bold text-blue-300/80">{institution.cursorReady ? "Incremental sync ready" : "Initial sync pending"}</span>
                 </span>
               </span>
-              <span className="shrink-0 text-sm font-bold text-blue-300">{institution.count} &gt;</span>
+              <span className="shrink-0 text-sm font-bold text-blue-300">{formatStatusDate(institution.updatedAt)} &gt;</span>
             </button>
-          ))}
+          )) : (
+            <div className="rounded-2xl border border-dashed border-[var(--line)] bg-[var(--surface-2)] p-6 text-sm font-bold text-[var(--muted)]">
+              No connected institutions yet.
+            </div>
+          )}
         </div>
       </SettingsSection>
     ),
@@ -1972,7 +2715,7 @@ function SettingsModal({
       >
         <div className="space-y-3">
           {state.rules.length ? state.rules.map((rule) => {
-            const category = categories.find((item) => item.id === rule.categoryId);
+            const category = rule.categoryId ? categories.find((item) => item.id === rule.categoryId) : undefined;
             return (
               <div key={rule.id} className="rounded-2xl border border-[var(--line)] bg-[var(--surface-2)] p-4">
                 <div className="flex flex-wrap items-start justify-between gap-3">
@@ -1987,9 +2730,17 @@ function SettingsModal({
                   </span>
                 </div>
                 <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
-                  <span className="rounded-full border border-blue-400/25 bg-blue-500/15 px-3 py-1.5 text-xs font-black text-blue-100">
-                    {category ? `${category.icon} ${category.name}` : "Uncategorized"}
-                  </span>
+                  <div className="flex flex-wrap items-center gap-2">
+                    {rule.internal ? (
+                      <span className="rounded-full border border-sky-400/25 bg-sky-500/15 px-3 py-1.5 text-xs font-black text-sky-100">
+                        Internal transfer
+                      </span>
+                    ) : (
+                      <span className="rounded-full border border-blue-400/25 bg-blue-500/15 px-3 py-1.5 text-xs font-black text-blue-100">
+                        {category ? `${category.icon} ${category.name}` : "Uncategorized"}
+                      </span>
+                    )}
+                  </div>
                   <div className="flex flex-wrap items-center gap-2">
                     <button type="button" className="rounded-full border border-[var(--line)] px-3 py-1.5 text-xs font-black text-[var(--muted)] hover:text-[var(--text)]" onClick={() => onToggleRule(rule.id)}>
                       {rule.enabled ? "Pause" : "Enable"}

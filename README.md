@@ -15,7 +15,7 @@ A local-first personal finance app inspired by Copilot Money's clean budgeting w
 ## Run Locally
 
 Use the installed Node.js/npm path if your normal shell still points at the Codex app shim.
-The normal dev command now clears the stale Next cache first, which prevents the "page loads but nothing clicks" issue caused by missing `_next/static` JavaScript files:
+The normal dev command now keeps the existing Next cache so everyday startup is faster:
 
 ```powershell
 & "C:\Program Files\nodejs\npm.cmd" install
@@ -34,7 +34,13 @@ If the app ever looks unstyled or frozen, keep the dev server running and check 
 & "C:\Program Files\nodejs\npm.cmd" run doctor
 ```
 
-If `doctor` fails, stop the dev server and start it again with `npm run dev`. Use `npm run dev:raw` only when you specifically want to bypass the automatic cache cleanup.
+If `doctor` fails, stop the dev server and restart with a clean cache:
+
+```powershell
+& "C:\Program Files\nodejs\npm.cmd" run dev:clean
+```
+
+Use `npm run repair` only when you want to clear `.next` without starting the app. Avoid running `npm run build` while the dev server is already running, because both commands write to `.next`.
 
 ## Environment
 
@@ -56,10 +62,12 @@ PLAID_ENV=production
 - Category add/edit/delete/reorder.
 - Transaction edit, category changes, split support, excluded flag, and internal transfer flag.
 - Goal create/edit/pause/complete and account-linked progress.
-- Plaid route skeletons for Link token and public token exchange.
+- Plaid Link token, public token exchange, encrypted token storage, sync, webhook, and status routes.
 - OpenAI categorization route skeleton for the AI Review flow.
 - Prisma schema for the local database layer.
 
 ## Next Implementation Step
 
-Run Prisma migration, then replace the browser-local seeded data with SQLite-backed data. After that, wire Plaid Link on the frontend and store Plaid accounts/transactions through Prisma.
+Connect the first real Plaid institution, confirm imported accounts and transactions, then tune merchant rules/category mapping with the live transaction set.
+
+See [PLAID_IMPLEMENTATION_PLAN.md](./PLAID_IMPLEMENTATION_PLAN.md) for how Plaid data flows into the app.

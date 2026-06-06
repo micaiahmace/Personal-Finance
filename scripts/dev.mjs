@@ -20,7 +20,13 @@ if (!existsSync(nextBinPath)) {
   process.exit(1);
 }
 
-await removeNextCache();
+const shouldClean = process.argv.includes("--clean") || process.env.FINANCE_CLEAN_NEXT === "1";
+
+if (shouldClean) {
+  await removeNextCache();
+} else {
+  console.log("Starting with the existing Next cache. Use npm run dev:clean only when the page looks stale or frozen.");
+}
 
 const devServer = spawn(process.execPath, [nextBinPath, "dev", "-H", "127.0.0.1", "-p", "3000"], {
   stdio: "inherit",

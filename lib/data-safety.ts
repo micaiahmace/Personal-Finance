@@ -59,6 +59,7 @@ export function sanitizeCategorizationPayload(payload: { categories: unknown[]; 
         pattern: asString(item.pattern),
         matchType: asString(item.matchType),
         categoryId: asString(item.categoryId),
+        internal: item.internal === true,
         enabled: item.enabled === true
       };
     }),
