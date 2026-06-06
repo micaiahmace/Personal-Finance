@@ -3,6 +3,7 @@
 @tailwind utilities;
 
 :root {
+  --font-ui: "Aptos", "Aptos Display", "Segoe UI", sans-serif;
   --bg: #020711;
   --surface: #07111f;
   --surface-2: #0a1728;
@@ -57,10 +58,10 @@ body {
     linear-gradient(140deg, rgba(22, 220, 114, 0.045), transparent 24rem),
     var(--bg);
   color: var(--text);
-  font-family: "Avenir Next", "Nunito Sans", "Manrope", "Aptos", "Segoe UI", sans-serif;
+  font-family: var(--font-ui);
   font-size: 15px;
-  font-weight: 400;
-  letter-spacing: -0.018em;
+  font-weight: 390;
+  letter-spacing: -0.012em;
   line-height: 1.45;
   text-rendering: geometricPrecision;
   -webkit-font-smoothing: antialiased;
@@ -71,23 +72,93 @@ button,
 input,
 select,
 textarea {
-  font: inherit;
+  font-family: var(--font-ui);
 }
 
 button {
   cursor: pointer;
+  font-weight: 480;
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6,
+strong,
+th,
+.premium-panel,
+.compact-panel,
+nav,
+label,
+.font-sans {
+  font-family: var(--font-ui);
+}
+
+h1,
+h2,
+h3,
+.text-2xl,
+.text-3xl,
+.text-4xl,
+.text-5xl {
+  font-weight: 560 !important;
+  letter-spacing: -0.045em;
+}
+
+.text-lg,
+.text-xl {
+  font-weight: 520 !important;
+  letter-spacing: -0.035em;
 }
 
 .font-black {
-  font-weight: 650;
+  font-weight: 500 !important;
 }
 
 .font-bold {
-  font-weight: 500;
+  font-weight: 400 !important;
 }
 
 .font-extrabold {
-  font-weight: 680;
+  font-weight: 540 !important;
+}
+
+.transaction-row {
+  font-family: var(--font-ui);
+  font-size: 14.5px;
+}
+
+.transaction-row * {
+  font-family: var(--font-ui);
+}
+
+.transaction-row .transaction-name {
+  font-weight: 430;
+  letter-spacing: -0.02em;
+}
+
+.transaction-row .transaction-account {
+  font-weight: 360;
+}
+
+.transaction-row .transaction-amount {
+  font-weight: 520;
+  letter-spacing: -0.01em;
+}
+
+.transaction-row .category-pill {
+  font-size: 11px;
+  font-weight: 520 !important;
+  letter-spacing: -0.005em;
+}
+
+.rounded-full,
+.rounded-xl,
+.rounded-2xl,
+.rounded-3xl {
+  font-family: var(--font-ui);
 }
 
 .tracking-tight {

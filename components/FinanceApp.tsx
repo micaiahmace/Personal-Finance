@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import {
   ArrowDownUp,
@@ -31,13 +31,17 @@ import {
   X
 } from "lucide-react";
 import { type CSSProperties, type FormEvent, useEffect, useMemo, useState } from "react";
-import { categorySpent, goalCurrent, groupTotals, incomeTotal, monthsUntil, netWorth, percent, projectedDate, ruleMatches, totalBudget, totalSpent, usd, usdExact } from "@/lib/finance";
+import { categorySpent, goalCurrent, groupTotals, monthsUntil, netWorth, percent, projectedDate, ruleMatches, totalBudget, totalSpent, usd, usdExact } from "@/lib/finance";
 import { seedState } from "@/lib/seed-data";
 import type { Account, AccountGroup, AiSuggestion, BudgetCategory, BudgetGroup, FinanceState, Goal, MerchantRule, Transaction, View } from "@/lib/types";
 
 const UI_PREFS_KEY = "personal-finance-ui-v1";
 const accountGroups: AccountGroup[] = ["Credit card", "Depository", "Investment", "Other"];
 type SettingsTab = "general" | "connections" | "rules" | "account" | "subscription" | "about";
+type TimeRange = "1W" | "1M" | "3M" | "YTD" | "1Y" | "ALL";
+type SeriesKind = "netPrimary" | "netSecondary" | "investment";
+
+const timeRanges: TimeRange[] = ["1W", "1M", "3M", "YTD", "1Y", "ALL"];
 
 const nav = [
   { id: "dashboard", label: "Dashboard", icon: BarChart3 },
@@ -258,6 +262,8 @@ export function FinanceApp() {
   const [bulkMenu, setBulkMenu] = useState<BulkMenu>(null);
   const [plaidBusy, setPlaidBusy] = useState(false);
   const [aiStatus, setAiStatus] = useState<AiStatus>({ ok: false, label: "AI checking" });
+  const [netWorthRange, setNetWorthRange] = useState<TimeRange>("1W");
+  const [investmentRange, setInvestmentRange] = useState<TimeRange>("1W");
 
   const categoriesById = useMemo(() => new Map(state.categories.map((category) => [category.id, category])), [state.categories]);
   const accountsById = useMemo(() => new Map(state.accounts.map((account) => [account.id, account])), [state.accounts]);
@@ -505,7 +511,7 @@ export function FinanceApp() {
     setCategoryDraft({
       id: category?.id,
       name: category?.name || "",
-      icon: category?.icon || "â€¢",
+      icon: category?.icon || "\u2022",
       budget: category?.budget || 0,
       groupId: category?.groupId || state.groups[0]?.id || ""
     });
@@ -664,7 +670,7 @@ export function FinanceApp() {
           </div>
 
           <div className="mt-auto grid gap-2 border-t border-[var(--line)] p-3">
-            <button className="rounded-xl px-3 py-3 text-left font-black text-[var(--orange)] hover:bg-[var(--surface-2)]" onClick={() => setUi({ view: "goals" })}>â–£ Start here</button>
+            <button className="rounded-xl px-3 py-3 text-left font-black text-[var(--orange)] hover:bg-[var(--surface-2)]" onClick={() => setUi({ view: "goals" })}>Start here</button>
             <button className="flex items-center gap-2 rounded-xl px-3 py-3 text-left font-black text-[var(--muted)] hover:bg-[var(--surface-2)] hover:text-[var(--text)]" onClick={() => setSettingsOpen(true)}><Settings size={16} /> Settings</button>
           </div>
         </aside>
@@ -725,54 +731,48 @@ export function FinanceApp() {
   function renderDashboard() {
     const budget = totalBudget(state.categories);
     const spent = totalSpent(state.transactions);
-    const recurring = state.recurrences.reduce((sum, recurrence) => sum + recurrence.amount, 0);
-    const monthlyIncome = incomeTotal(state.transactions);
-    const monthlySaved = monthlyIncome - spent;
-    const savingsRate = monthlyIncome > 0 ? Math.max(0, (monthlySaved / monthlyIncome) * 100) : 0;
-    const savingsGrowth = monthlySaved;
+    const remainingBudget = budget - spent;
+    const overBudget = remainingBudget < 0;
+    const reviewTransactions = [...state.transactions]
+      .filter((transaction) => !transaction.reviewed || state.aiInbox.some((item) => item.transactionId === transaction.id))
+      .sort((a, b) => b.date.localeCompare(a.date))
+      .slice(0, 5);
+
     return (
       <div className="fade-in space-y-6">
         <div className="grid gap-6 xl:grid-cols-2">
           <Panel title="Monthly spending" action="Transactions" onAction={() => setUi({ view: "transactions" })}>
-            <div className="grid min-h-72 place-items-center text-center">
-              <div>
-                <p className="text-4xl font-black">{usd.format(budget - spent)} left</p>
+            <div className="flex min-h-[clamp(18rem,32vw,24rem)] items-center text-center">
+              <div className="w-full">
+                <p className={`text-4xl font-black ${overBudget ? "text-red-200" : ""}`}>{usd.format(Math.abs(remainingBudget))} {overBudget ? "over" : "left"}</p>
                 <p className="mt-2 font-bold text-[var(--muted)]">{usd.format(budget)} budgeted</p>
-                <LineChart values={[14, 14, 20, 22, 24, 29, 31, 34, 37]} color="var(--green)" />
+                <SpendingDashboardChart className="mt-8 h-[clamp(9rem,16vw,13rem)] w-full" transactions={state.transactions} spent={spent} budget={budget} />
               </div>
             </div>
           </Panel>
           <Panel title="Net worth" action="Accounts" onAction={() => setUi({ view: "accounts" })}>
-            <div className="grid min-h-72 place-items-center text-center">
-              <div>
+            <div className="flex min-h-[clamp(18rem,32vw,24rem)] items-center text-center">
+              <div className="w-full">
                 <p className="font-bold text-[var(--muted)]">Net worth</p>
                 <p className="mt-1 text-4xl font-black">{usd.format(netWorth(state.accounts))}</p>
                 <Chip tone="red">Down 10.59%</Chip>
-                <LineChart values={[58, 58, 58, 55, 55, 55, 56, 56, 56]} color="#65aefc" secondValues={[42, 41, 41, 41, 42, 42, 42, 42]} secondColor="#ff8b54" />
+                <NetWorthDashboardChart className="mt-8 h-[clamp(9rem,16vw,13rem)] w-full" range={netWorthRange} />
+                <RangeTabs value={netWorthRange} onChange={setNetWorthRange} />
               </div>
             </div>
           </Panel>
-          <Panel title="Savings pulse" action="Goals" onAction={() => setUi({ view: "goals" })}>
-            <div className="grid min-h-72 gap-4 md:grid-cols-2">
-              <div className="rounded-3xl border border-emerald-400/20 bg-emerald-500/10 p-5">
-                <div className="text-sm font-black text-emerald-200">Savings rate</div>
-                <div className="mt-5 text-5xl font-black tracking-tight">{savingsRate.toFixed(1)}%</div>
-                <div className="mt-2 text-sm font-bold text-[var(--muted)]">{usd.format(Math.max(0, monthlySaved))} saved from {usd.format(monthlyIncome)} income</div>
-                <div className="mt-8 h-2 overflow-hidden rounded-full bg-[var(--surface-3)]">
-                  <div className="h-full rounded-full bg-gradient-to-r from-emerald-400 to-cyan-300" style={{ width: `${Math.min(100, savingsRate)}%` }} />
-                </div>
-              </div>
-              <div className="rounded-3xl border border-blue-400/20 bg-blue-500/10 p-5">
-                <div className="text-sm font-black text-blue-200">Savings growth</div>
-                <div className={`mt-5 text-5xl font-black tracking-tight ${savingsGrowth >= 0 ? "text-emerald-200" : "text-red-200"}`}>{savingsGrowth >= 0 ? "+" : ""}{usd.format(savingsGrowth)}</div>
-                <div className="mt-2 text-sm font-bold text-[var(--muted)]">Net saved in the last month</div>
-                <div className="mt-7 flex h-20 items-end gap-2 rounded-2xl bg-[var(--surface-2)] p-3">
-                  {[34, 42, 38, 56, 62, 75, 84, 92].map((height, index) => (
-                    <span key={height + index} className="flex-1 rounded-full bg-gradient-to-t from-blue-500 to-emerald-300 opacity-90" style={{ height: `${height}%` }} />
-                  ))}
-                </div>
-              </div>
-            </div>
+          <Panel title="Transactions to review" action="View all" onAction={() => setUi({ view: "transactions" })}>
+            <DashboardReviewList
+              transactions={reviewTransactions}
+              accountsById={accountsById}
+              categoriesById={categoriesById}
+              onMarkReviewed={() => commit((draft) => {
+                const ids = new Set(reviewTransactions.map((transaction) => transaction.id));
+                draft.transactions.forEach((transaction) => {
+                  if (ids.has(transaction.id)) transaction.reviewed = true;
+                });
+              })}
+            />
           </Panel>
           <div className="space-y-6">
             <Panel title="Top categories" action="View all" onAction={() => setUi({ view: "categories" })}>{renderTopCategories()}</Panel>
@@ -780,11 +780,6 @@ export function FinanceApp() {
               <div className="space-y-3">{state.recurrences.slice(0, 3).map(renderRecurrenceRow)}</div>
             </Panel>
           </div>
-        </div>
-        <div className="grid gap-3 md:grid-cols-3">
-          <Metric label="Cash flow" value={usd.format(incomeTotal(state.transactions) - spent)} tone="green" />
-          <Metric label="Income" value={usd.format(incomeTotal(state.transactions))} tone="green" />
-          <Metric label="Recurring expenses" value={usd.format(recurring)} tone="orange" />
         </div>
       </div>
     );
@@ -869,7 +864,7 @@ export function FinanceApp() {
     const review = state.aiInbox.find((item) => item.transactionId === transaction.id && item.confidence < 0.9);
     const selected = selectedTransactionIds.includes(transaction.id);
     return (
-      <div key={transaction.id} className={`group grid grid-cols-[22px_minmax(0,1fr)_auto_auto] items-center gap-3 border-b border-[var(--line)] px-4 py-2.5 last:border-b-0 hover:bg-[var(--surface-2)] ${selected ? "bg-blue-500/18" : ""}`}>
+      <div key={transaction.id} className={`transaction-row group grid grid-cols-[22px_minmax(0,1fr)_auto_auto] items-center gap-3 border-b border-[var(--line)] px-4 py-2.5 last:border-b-0 hover:bg-[var(--surface-2)] ${selected ? "bg-blue-500/18" : ""}`}>
         <input
           aria-label={`Select ${transaction.name}`}
           type="checkbox"
@@ -878,24 +873,24 @@ export function FinanceApp() {
           onChange={() => toggleTransactionSelection(transaction.id)}
         />
         <button className="min-w-0 text-left" onClick={() => editTransactionCategory(transaction)}>
-          <span className="font-black">{transaction.name}</span>
-          <span className="ml-2 font-bold text-blue-300/70">{accountSource(account)}</span>
+          <span className="transaction-name">{transaction.name}</span>
+          <span className="transaction-account ml-2 text-blue-300/70">{accountSource(account)}</span>
           {transaction.internal ? <span className="ml-2 rounded-full bg-blue-500/15 px-2 py-0.5 text-xs font-black text-blue-200">INTERNAL</span> : null}
           {transaction.excluded ? <span className="ml-2 rounded-full bg-red-500/15 px-2 py-0.5 text-xs font-black text-red-200">EXCLUDED</span> : null}
           {review ? <span className="ml-2 rounded-full bg-amber-500/15 px-2 py-0.5 text-xs font-black text-amber-200">AI REVIEW</span> : null}
         </button>
-        <button className={`rounded-full border px-3 py-1 text-xs font-black ${categoryTone(category)}`} onClick={() => editTransactionCategory(transaction)}>
+        <button className={`category-pill rounded-full border px-3 py-1 ${categoryTone(category)}`} onClick={() => editTransactionCategory(transaction)}>
           {category?.icon ? <span className="mr-1">{category.icon}</span> : null}{categoryLabel(category)}
         </button>
         <div className="flex items-center justify-end gap-3">
-          <span className={`min-w-20 text-right font-black ${transaction.amount > 0 ? "text-[var(--green)]" : ""}`}>{usdExact.format(Math.abs(transaction.amount))}</span>
+          <span className={`transaction-amount min-w-20 text-right ${transaction.amount > 0 ? "text-[var(--green)]" : ""}`}>{usdExact.format(Math.abs(transaction.amount))}</span>
           <div className="hidden items-center gap-1 opacity-0 transition group-hover:flex group-hover:opacity-100">
-            <IconButton label="Split" onClick={() => splitTransaction(transaction)}>â‘‚</IconButton>
+            <IconButton label="Split" onClick={() => splitTransaction(transaction)}>S</IconButton>
             <IconButton label="Create rule" onClick={() => openRule(undefined, transaction.name)}><Flag size={14} /></IconButton>
             <IconButton label="Exclude" onClick={() => commit((draft) => {
               const target = draft.transactions.find((item) => item.id === transaction.id);
               if (target) target.excluded = !target.excluded;
-            })}>âŠ˜</IconButton>
+            })}>X</IconButton>
             <IconButton label="Internal transfer" onClick={() => commit((draft) => {
               const target = draft.transactions.find((item) => item.id === transaction.id);
               if (target) {
@@ -974,17 +969,13 @@ export function FinanceApp() {
           </button>
         </div>
         <section className="premium-panel p-5">
-          <div className="grid min-h-64 place-items-center text-center">
+          <div className="flex min-h-[clamp(18rem,30vw,23rem)] items-center text-center">
             <div className="w-full">
               <div className="text-sm font-black text-blue-300">Net worth</div>
               <div className="mt-1 text-3xl font-black tracking-tight">{usdExact.format(worth)}</div>
               <div className="mt-3"><Chip tone="red">Down 10.59%</Chip></div>
-              <LineChart values={[42, 42, 42, 41, 40, 40, 40, 40, 41, 41]} color="#5ea7ff" secondValues={[28, 27, 27, 27, 27, 27, 28, 28, 28, 28]} secondColor="#ff8558" />
-              <div className="mt-1 flex justify-center gap-8 text-sm font-black text-blue-300">
-                {["1W", "1M", "3M", "YTD", "1Y", "ALL"].map((range, index) => (
-                  <button key={range} className={`rounded-full px-3 py-1.5 ${index === 0 ? "bg-[var(--surface-2)] text-[var(--text)]" : ""}`}>{range}</button>
-                ))}
-              </div>
+              <LineChart className="mt-8 h-[clamp(10rem,18vw,15rem)] w-full" values={rangeSeries(netWorthRange, "netPrimary")} color="#5ea7ff" secondValues={rangeSeries(netWorthRange, "netSecondary")} secondColor="#ff8558" />
+              <RangeTabs value={netWorthRange} onChange={setNetWorthRange} />
             </div>
           </div>
         </section>
@@ -1009,10 +1000,10 @@ export function FinanceApp() {
         </button>
         <div className="overflow-hidden border-b border-[var(--line)] pb-3">
           {state.accountGroupsOpen[group] ? accounts.map((account, index) => renderAccountListRow(account, index)) : null}
-          <div className="grid grid-cols-[minmax(0,1fr)_120px_90px_130px] items-center gap-6 px-1 py-4">
+          <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-4 gap-y-2 px-1 py-4 md:grid-cols-[minmax(0,1fr)_minmax(96px,14vw)_90px_120px] md:gap-6">
             <div />
             <div />
-            <Chip tone={averageChange >= 0 ? "green" : "red"}>{averageChange >= 0 ? "•" : "?"} {Math.abs(averageChange).toFixed(2)}%</Chip>
+            <Chip tone={averageChange >= 0 ? "green" : "red"}>{averageChange >= 0 ? "Up" : "Down"} {Math.abs(averageChange).toFixed(2)}%</Chip>
             <div className="text-right font-black">{usdExact.format(total)}</div>
           </div>
         </div>
@@ -1023,7 +1014,7 @@ export function FinanceApp() {
   function renderAccountListRow(account: Account, index: number) {
     const positive = account.change >= 0;
     return (
-      <button key={account.id} className={`grid w-full grid-cols-[minmax(0,1fr)_120px_90px_130px] items-center gap-6 rounded-xl px-1 py-3 text-left transition hover:bg-[var(--surface-2)] ${state.selectedAccountId === account.id ? "bg-[var(--selected-soft)]" : ""}`} onClick={() => setUi({ selectedAccountId: account.id })}>
+      <button key={account.id} className={`grid w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-x-4 gap-y-2 rounded-xl px-1 py-3 text-left transition hover:bg-[var(--surface-2)] md:grid-cols-[minmax(0,1fr)_minmax(96px,14vw)_90px_120px] md:gap-6 ${state.selectedAccountId === account.id ? "bg-[var(--selected-soft)]" : ""}`} onClick={() => setUi({ selectedAccountId: account.id })}>
         <div className="flex min-w-0 items-center gap-3">
           <AccountLogo account={account} />
           <div className="min-w-0">
@@ -1031,8 +1022,8 @@ export function FinanceApp() {
             <div className="text-sm font-bold text-blue-300/75">11 hours ago</div>
           </div>
         </div>
-        <AccountSparkline values={accountSparkValues(account, index)} color={positive ? "var(--green)" : "var(--red)"} />
-        <Chip tone={positive ? "green" : "red"}>{positive ? "•" : "?"} {Math.abs(account.change).toFixed(2)}%</Chip>
+        <AccountSparkline className="order-3 col-span-2 h-10 w-full md:order-none md:col-span-1 md:w-full" values={accountSparkValues(account, index)} color={positive ? "var(--green)" : "var(--red)"} />
+        <Chip tone={positive ? "green" : "red"}>{positive ? "Up" : "Down"} {Math.abs(account.change).toFixed(2)}%</Chip>
         <div className="text-right font-black">{usdExact.format(account.balance)}</div>
       </button>
     );
@@ -1043,11 +1034,12 @@ export function FinanceApp() {
     return (
       <div className="fade-in space-y-6">
         <Panel title="Live balance estimate" action="Settings">
-          <div className="grid min-h-72 place-items-center text-center">
-            <div>
+          <div className="flex min-h-[clamp(18rem,30vw,24rem)] items-center text-center">
+            <div className="w-full">
               <p className="text-4xl font-black">{usdExact.format(total)}</p>
               <Chip tone="green">Up 2.88%</Chip>
-              <LineChart values={[32, 32, 32, 33, 33, 31, 55, 47, 41]} color="var(--green)" />
+              <LineChart className="mt-8 h-[clamp(10rem,20vw,16rem)] w-full" values={rangeSeries(investmentRange, "investment")} color="var(--green)" />
+              <RangeTabs value={investmentRange} onChange={setInvestmentRange} />
             </div>
           </div>
         </Panel>
@@ -1081,10 +1073,10 @@ export function FinanceApp() {
     return (
       <div key={recurrence.id} className="compact-panel grid gap-3 p-4 md:grid-cols-[1fr_auto] md:items-center">
         <div className="flex items-center gap-3">
-          <span className="grid h-10 w-10 place-items-center rounded-2xl bg-[var(--surface-2)]">{category?.icon || "â—·"}</span>
+          <span className="grid h-10 w-10 place-items-center rounded-2xl bg-[var(--surface-2)]">{category?.icon || "\u25c7"}</span>
           <div>
             <div className="font-black">{recurrence.merchant} <span className="font-bold text-[var(--muted)]">{recurrence.cadence}</span></div>
-            <div className="text-sm text-[var(--muted)]">{recurrence.date} â€¢ {category?.name || "Uncategorized"}</div>
+            <div className="text-sm text-[var(--muted)]">{recurrence.date} {"\u2022"} {category?.name || "Uncategorized"}</div>
           </div>
         </div>
         <strong>{usdExact.format(recurrence.amount)}</strong>
@@ -1121,7 +1113,7 @@ export function FinanceApp() {
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <div className="flex items-center gap-3 text-lg font-black"><span className="grid h-10 w-10 place-items-center rounded-2xl bg-[var(--surface-2)]">{goal.icon}</span>{goal.name}</div>
-            <div className="mt-2 text-sm font-bold text-[var(--muted)]">{account?.name || "No account assigned"} â€¢ {goal.status} â€¢ {goal.priority}</div>
+            <div className="mt-2 text-sm font-bold text-[var(--muted)]">{account?.name || "No account assigned"} {"\u2022"} {goal.status} {"\u2022"} {goal.priority}</div>
           </div>
           <Chip tone={goal.status === "Active" ? "green" : "blue"}>{goal.status}</Chip>
         </div>
@@ -1189,21 +1181,310 @@ export function FinanceApp() {
   }
 }
 
-function LineChart({ values, color, secondValues, secondColor }: { values: number[]; color: string; secondValues?: number[]; secondColor?: string }) {
+function LineChart({
+  values,
+  color,
+  secondValues,
+  secondColor,
+  className = "mt-7 h-28 w-full"
+}: {
+  values: number[];
+  color: string;
+  secondValues?: number[];
+  secondColor?: string;
+  className?: string;
+}) {
   const all = [...values, ...(secondValues ?? [])];
   const max = Math.max(...all);
   const min = Math.min(...all);
-  const points = values.map((value, index) => `${(index / (values.length - 1)) * 100},${88 - ((value - min) / (max - min || 1)) * 72}`).join(" ");
-  const second = secondValues?.map((value, index) => `${(index / (secondValues.length - 1)) * 100},${88 - ((value - min) / (max - min || 1)) * 72}`).join(" ");
+  const range = max - min || 1;
+  const xFor = (index: number, length: number) => 4 + (index / Math.max(1, length - 1)) * 92;
+  const yFor = (value: number) => 86 - ((value - min) / range) * 68;
+  const points = values.map((value, index) => `${xFor(index, values.length)},${yFor(value)}`).join(" ");
+  const second = secondValues?.map((value, index) => `${xFor(index, secondValues.length)},${yFor(value)}`).join(" ");
+  const endX = xFor(values.length - 1, values.length);
   const endY = points.split(" ").at(-1)?.split(",")[1] ?? "50";
 
   return (
-    <svg className="mt-7 h-28 w-full" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
-      <polyline points={points} fill="none" stroke={color} strokeWidth="3" strokeLinecap="round" />
-      {second ? <polyline points={second} fill="none" stroke={secondColor} strokeWidth="3" strokeLinecap="round" /> : null}
-      <circle cx="100" cy={endY} r="2.1" fill="var(--surface)" stroke={color} strokeWidth="2" vectorEffect="non-scaling-stroke" />
-    </svg>
+    <div className={`relative ${className}`}>
+      <svg className="h-full w-full overflow-visible" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+        <polyline points={points} fill="none" stroke={color} strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" vectorEffect="non-scaling-stroke" />
+        {second ? <polyline points={second} fill="none" stroke={secondColor} strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" vectorEffect="non-scaling-stroke" /> : null}
+      </svg>
+      <span
+        className="pointer-events-none absolute h-2.5 w-2.5 -translate-x-1/2 -translate-y-1/2 rounded-full border-2"
+        style={{ left: `${endX}%`, top: `${endY}%`, borderColor: color, backgroundColor: "var(--surface)" }}
+        aria-hidden="true"
+      />
+    </div>
   );
+}
+
+function SpendingDashboardChart({
+  className,
+  transactions,
+  spent,
+  budget
+}: {
+  className?: string;
+  transactions: Transaction[];
+  spent: number;
+  budget: number;
+}) {
+  const today = new Date();
+  const monthStart = new Date(today.getFullYear(), today.getMonth(), 1);
+  const daysInMonth = new Date(today.getFullYear(), today.getMonth() + 1, 0).getDate();
+  const todayDay = Math.min(today.getDate(), daysInMonth);
+  const dailySpend = Array.from({ length: todayDay }, () => 0);
+
+  transactions.forEach((transaction) => {
+    const transactionDate = parseLocalDate(transaction.date);
+    const sameMonth = transactionDate.getFullYear() === monthStart.getFullYear() && transactionDate.getMonth() === monthStart.getMonth();
+    if (!sameMonth || transactionDate.getDate() > todayDay || transaction.amount >= 0 || transaction.excluded || transaction.internal) return;
+    dailySpend[transactionDate.getDate() - 1] += Math.abs(transaction.amount);
+  });
+
+  const actualValues = dailySpend.reduce<number[]>((values, amount, index) => {
+    values.push((values[index - 1] ?? 0) + amount);
+    return values;
+  }, []);
+
+  if (actualValues.length === 0) {
+    actualValues.push(0);
+  }
+
+  const maxChartValue = Math.max(budget, spent, ...actualValues, 1) * 1.08;
+  const budgetLine = { x1: 4, y1: valueY(0, maxChartValue), x2: 96, y2: valueY(budget, maxChartValue) };
+  const actualPoints = actualValues.map((value, index) => {
+    const day = index + 1;
+    return {
+      day,
+      value,
+      x: 4 + ((day - 1) / Math.max(1, daysInMonth - 1)) * 92,
+      y: valueY(value, maxChartValue),
+      paceValue: budget * (day / daysInMonth)
+    };
+  });
+
+  const lastPoint = actualPoints.at(-1) ?? { x: 4, y: valueY(0, maxChartValue), value: 0, paceValue: 0 };
+  const over = spent > budget;
+  const label = over ? `${usdExact.format(spent - budget)} over` : `${usd.format(budget - spent)} left`;
+  const badgeColor = budgetHealthColor(lastPoint.value, lastPoint.paceValue);
+
+  return (
+    <div className={`relative ${className ?? "h-44 w-full"}`}>
+      <svg className="h-full w-full overflow-visible" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+        <line x1={budgetLine.x1} x2={budgetLine.x2} y1={budgetLine.y1} y2={budgetLine.y2} stroke="#12365d" strokeWidth="2" strokeDasharray="3 5" vectorEffect="non-scaling-stroke" />
+        {actualPoints.map((point, index) => {
+          const previous = actualPoints[index - 1];
+          if (!previous) return null;
+          return (
+            <line
+              key={`${previous.day}-${point.day}`}
+              x1={previous.x}
+              y1={previous.y}
+              x2={point.x}
+              y2={point.y}
+              stroke={budgetHealthColor(point.value, point.paceValue)}
+              strokeWidth="3"
+              strokeLinecap="round"
+              vectorEffect="non-scaling-stroke"
+            />
+          );
+        })}
+      </svg>
+      <span
+        className="pointer-events-none absolute h-2.5 w-2.5 -translate-x-1/2 -translate-y-1/2 rounded-full border-2"
+        style={{ left: `${lastPoint.x}%`, top: `${lastPoint.y}%`, borderColor: badgeColor, backgroundColor: "var(--surface)" }}
+        aria-hidden="true"
+      />
+      <span
+        className="absolute -translate-y-full rounded-md px-2 py-1 text-xs font-black text-white"
+        style={{ left: `${Math.min(86, lastPoint.x + 1)}%`, top: `${Math.max(16, lastPoint.y - 7)}%`, backgroundColor: badgeColor }}
+      >
+        {label}
+      </span>
+    </div>
+  );
+}
+
+function valueY(value: number, maxValue: number) {
+  return 86 - (value / maxValue) * 62;
+}
+
+function budgetHealthColor(actual: number, pace: number) {
+  if (pace <= 0 && actual > 0) return "var(--red)";
+  if (pace <= 0) return "var(--green)";
+
+  const paceRatio = actual / pace;
+  if (paceRatio >= 1) return "var(--red)";
+  if (paceRatio >= 0.92) return "#f97316";
+  if (paceRatio >= 0.8) return "#fbbf24";
+  if (paceRatio >= 0.65) return "#84cc16";
+  return "var(--green)";
+}
+
+function NetWorthDashboardChart({ className, range }: { className?: string; range: TimeRange }) {
+  const primary = chartPoints(rangeSeries(range, "netPrimary"), 34, 20);
+  const secondary = chartPoints(rangeSeries(range, "netSecondary"), 64, 9);
+  const lastPrimary = primary.at(-1) ?? { x: 96, y: 36 };
+  const lastSecondary = secondary.at(-1) ?? { x: 96, y: 63 };
+
+  return (
+    <div className={`relative ${className ?? "h-44 w-full"}`}>
+      <svg className="h-full w-full overflow-visible" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+        <polyline points={primary.slice(0, -2).map(pointPair).join(" ")} fill="none" stroke="#65aefc" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" vectorEffect="non-scaling-stroke" />
+        <polyline points={primary.slice(-3).map(pointPair).join(" ")} fill="none" stroke="#65aefc" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" strokeDasharray="1 6" vectorEffect="non-scaling-stroke" />
+        <polyline points={secondary.slice(0, -2).map(pointPair).join(" ")} fill="none" stroke="#ff8b54" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" vectorEffect="non-scaling-stroke" />
+        <polyline points={secondary.slice(-3).map(pointPair).join(" ")} fill="none" stroke="#ff8b54" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" strokeDasharray="1 6" vectorEffect="non-scaling-stroke" />
+      </svg>
+      <span className="pointer-events-none absolute h-2.5 w-2.5 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-[#65aefc] bg-[var(--surface)]" style={{ left: `${lastPrimary.x}%`, top: `${lastPrimary.y}%` }} aria-hidden="true" />
+      <span className="pointer-events-none absolute h-2.5 w-2.5 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-[#ff8b54] bg-[var(--surface)]" style={{ left: `${lastSecondary.x}%`, top: `${lastSecondary.y}%` }} aria-hidden="true" />
+    </div>
+  );
+}
+
+function DashboardReviewList({
+  transactions,
+  accountsById,
+  categoriesById,
+  onMarkReviewed
+}: {
+  transactions: Transaction[];
+  accountsById: Map<string, Account>;
+  categoriesById: Map<string, BudgetCategory>;
+  onMarkReviewed: () => void;
+}) {
+  const grouped = transactions.reduce<Array<{ label: string; transactions: Transaction[] }>>((groups, transaction) => {
+    const label = formatTransactionGroupDate(transaction.date);
+    let group = groups.find((item) => item.label === label);
+
+    if (!group) {
+      group = { label, transactions: [] };
+      groups.push(group);
+    }
+
+    group.transactions.push(transaction);
+    return groups;
+  }, []);
+
+  return (
+    <div className="flex min-h-[17.5rem] flex-col">
+      <div className="flex-1 space-y-4">
+        {grouped.length ? grouped.map((group) => (
+          <div key={group.label} className="space-y-2">
+            <div className="text-sm font-black text-blue-300">{group.label}</div>
+            <div className="space-y-1">
+              {group.transactions.map((transaction) => {
+                const account = accountsById.get(transaction.accountId);
+                const category = transaction.categoryId ? categoriesById.get(transaction.categoryId) : undefined;
+                const positive = transaction.amount > 0;
+
+                return (
+                  <div key={transaction.id} className="grid grid-cols-[18px_18px_minmax(0,1fr)_auto_auto_8px] items-center gap-2 rounded-lg py-1.5 text-sm">
+                    <input className="h-3.5 w-3.5 rounded border-[var(--line)] bg-transparent" type="checkbox" readOnly />
+                    <span className="grid h-3.5 w-3.5 place-items-center rounded border border-blue-300/45 text-[9px] font-black text-blue-300">T</span>
+                    <div className="min-w-0">
+                      <span className="truncate font-black text-[var(--text)]">{transaction.name}</span>
+                      <span className="ml-2 truncate font-bold text-blue-300/70">{accountSource(account)}</span>
+                    </div>
+                    {category ? (
+                      <span className={`category-pill hidden rounded-full border px-2.5 py-1 md:inline-flex ${categoryTone(category)}`}>
+                        {category.icon} {categoryLabel(category)}
+                      </span>
+                    ) : <span />}
+                    <span className={`text-right font-black ${positive ? "text-[var(--green)]" : "text-[var(--text)]"}`}>
+                      {usdExact.format(Math.abs(transaction.amount))}
+                    </span>
+                    <span className="h-1 w-1 rounded-full bg-blue-300" />
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )) : (
+          <div className="grid min-h-44 place-items-center rounded-2xl border border-dashed border-[var(--line)] text-sm font-bold text-[var(--muted)]">
+            Nothing to review right now.
+          </div>
+        )}
+      </div>
+      <div className="mt-4 flex items-center justify-between border-t border-[var(--line)] pt-4 text-sm font-bold text-blue-300">
+        <span>1 - {Math.max(1, transactions.length)} of {Math.max(1, transactions.length)}</span>
+        <button className="inline-flex items-center gap-2 rounded-xl border border-[var(--line)] bg-[var(--surface-2)] px-4 py-2 font-black text-[var(--text)]" onClick={onMarkReviewed}>
+          <Check size={15} /> Mark {transactions.length || 0} as reviewed
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function RangeTabs({ value, onChange }: { value: TimeRange; onChange: (range: TimeRange) => void }) {
+  return (
+    <div className="mt-4 flex flex-wrap justify-center gap-5 text-sm font-black text-blue-300">
+      {timeRanges.map((range) => (
+        <button
+          key={range}
+          type="button"
+          className={`rounded-full px-3 py-1.5 transition ${value === range ? "bg-[var(--surface-2)] text-[var(--text)]" : "hover:bg-[var(--surface-2)] hover:text-[var(--text)]"}`}
+          onClick={() => onChange(range)}
+        >
+          {range}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function rangeSeries(range: TimeRange, kind: SeriesKind) {
+  const pointsByRange: Record<TimeRange, Record<SeriesKind, number[]>> = {
+    "1W": {
+      netPrimary: [58, 58, 58, 55, 55, 56, 56, 56],
+      netSecondary: [42, 41, 41, 41, 42, 42, 42, 42],
+      investment: [32, 32, 33, 33, 31, 55, 47, 41]
+    },
+    "1M": {
+      netPrimary: [61, 60, 60, 58, 57, 57, 58, 58, 59, 59],
+      netSecondary: [43, 42, 42, 42, 43, 43, 43, 44, 44, 44],
+      investment: [31, 33, 34, 32, 36, 41, 48, 46, 50, 54]
+    },
+    "3M": {
+      netPrimary: [64, 63, 61, 60, 58, 57, 57, 58, 59, 60, 60],
+      netSecondary: [44, 43, 43, 42, 42, 42, 43, 43, 44, 44, 45],
+      investment: [28, 31, 35, 33, 37, 44, 48, 51, 49, 56, 62]
+    },
+    YTD: {
+      netPrimary: [67, 65, 63, 61, 60, 58, 57, 58, 60, 61, 62, 63],
+      netSecondary: [45, 44, 44, 43, 42, 42, 42, 43, 44, 44, 45, 45],
+      investment: [24, 28, 31, 35, 37, 42, 48, 46, 52, 57, 61, 66]
+    },
+    "1Y": {
+      netPrimary: [70, 69, 66, 63, 60, 57, 55, 56, 58, 60, 62, 64],
+      netSecondary: [47, 46, 45, 44, 43, 42, 42, 43, 44, 45, 45, 46],
+      investment: [21, 25, 31, 29, 35, 39, 43, 51, 48, 57, 63, 70]
+    },
+    ALL: {
+      netPrimary: [55, 58, 63, 68, 66, 62, 58, 55, 57, 60, 63, 66],
+      netSecondary: [38, 40, 43, 45, 44, 42, 41, 42, 43, 44, 45, 47],
+      investment: [18, 23, 28, 35, 31, 40, 46, 54, 50, 61, 68, 76]
+    }
+  };
+
+  return pointsByRange[range][kind];
+}
+
+function chartPoints(values: number[], baseline: number, height: number) {
+  const max = Math.max(...values);
+  const min = Math.min(...values);
+  const range = max - min || 1;
+
+  return values.map((value, index) => ({
+    x: 4 + (index / Math.max(1, values.length - 1)) * 92,
+    y: baseline - ((value - min) / range) * height
+  }));
+}
+
+function pointPair(point: { x: number; y: number }) {
+  return `${point.x},${point.y}`;
 }
 
 function Progress({ spent, budget, color }: { spent: number; budget: number; color: string }) {
@@ -1229,7 +1510,7 @@ function Panel({ title, action, onAction, children }: { title: string; action?: 
     <article className="premium-panel overflow-hidden">
       <div className="flex items-center justify-between gap-3 px-5 pt-5">
         <h2 className="font-black">{title}</h2>
-        {action ? <button className="font-black text-blue-300" onClick={onAction}>{action} â€º</button> : null}
+        {action ? <button className="font-black text-blue-300" onClick={onAction}>{action} &gt;</button> : null}
       </div>
       <div className="p-5">{children}</div>
     </article>
@@ -1266,14 +1547,15 @@ function AccountLogo({ account }: { account: Account }) {
   );
 }
 
-function AccountSparkline({ values, color }: { values: number[]; color: string }) {
+function AccountSparkline({ values, color, className = "h-10 w-28" }: { values: number[]; color: string; className?: string }) {
   const max = Math.max(...values);
   const min = Math.min(...values);
-  const points = values.map((value, index) => `${(index / (values.length - 1)) * 100},${34 - ((value - min) / (max - min || 1)) * 28}`).join(" ");
+  const range = max - min || 1;
+  const points = values.map((value, index) => `${3 + (index / Math.max(1, values.length - 1)) * 94},${34 - ((value - min) / range) * 28}`).join(" ");
   const gradientId = `spark-${color.replace(/[^a-z0-9]/gi, "")}`;
 
   return (
-    <svg className="h-10 w-28" viewBox="0 0 100 40" preserveAspectRatio="none" aria-hidden="true">
+    <svg className={className} viewBox="0 0 100 40" preserveAspectRatio="none" aria-hidden="true">
       <defs>
         <linearGradient id={gradientId} x1="0" x2="0" y1="0" y2="1">
           <stop offset="0%" stopColor={color} stopOpacity="0.22" />
@@ -1668,7 +1950,7 @@ function SettingsModal({
                   <span className="block text-sm font-bold text-blue-300/80">{institution.linked}</span>
                 </span>
               </span>
-              <span className="shrink-0 text-sm font-bold text-blue-300">{institution.count} â€º</span>
+              <span className="shrink-0 text-sm font-bold text-blue-300">{institution.count} &gt;</span>
             </button>
           ))}
         </div>
@@ -1742,7 +2024,7 @@ function SettingsModal({
     ),
     subscription: (
       <SettingsSection title="Subscription">
-        <SettingsRow title="Monthly" description="$13/month Â· Renews Jul 1, 2026"><button className="rounded-xl border border-[var(--line)] bg-[var(--surface-2)] px-3 py-2 text-sm font-black">Change plan</button></SettingsRow>
+        <SettingsRow title="Monthly" description="$13/month \u00b7 Renews Jul 1, 2026"><button className="rounded-xl border border-[var(--line)] bg-[var(--surface-2)] px-3 py-2 text-sm font-black">Change plan</button></SettingsRow>
         <SettingsRow title="Payment method" description="Subscribed through Apple App Store"><button className="rounded-xl border border-[var(--line)] bg-[var(--surface-2)] px-3 py-2 text-sm font-black">Manage payment</button></SettingsRow>
       </SettingsSection>
     ),
@@ -1809,6 +2091,7 @@ function Toggle({ enabled }: { enabled: boolean }) {
     </span>
   );
 }
+
 
 
 

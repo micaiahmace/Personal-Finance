@@ -9,7 +9,8 @@ const config: Config = {
         panel: "1.25rem"
       },
       fontFamily: {
-        rounded: ["Avenir Next", "Nunito Sans", "Manrope", "Aptos", "Segoe UI", "sans-serif"]
+        sans: ["Aptos", "Aptos Display", "Segoe UI", "sans-serif"],
+        rounded: ["Aptos", "Aptos Display", "Segoe UI", "sans-serif"]
       },
       boxShadow: {
         soft: "0 24px 80px rgba(0, 0, 0, 0.28)"
