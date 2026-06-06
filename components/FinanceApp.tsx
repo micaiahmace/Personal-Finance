@@ -257,7 +257,9 @@ function escapeRegExp(value: string) {
 }
 
 function accountDisplayName(account: Account) {
-  const name = (account.officialName || account.name).trim();
+  const plaidName = account.name.trim();
+  const officialName = account.officialName?.trim() || "";
+  const name = account.group === "Investment" && plaidName ? plaidName : officialName || plaidName;
   const last4 = account.last4.trim();
   if (!last4) return name;
 
@@ -1770,8 +1772,10 @@ export function FinanceApp() {
         <Panel title="Live balance estimate" action="Settings">
           <div className="flex min-h-[clamp(18rem,30vw,24rem)] items-center text-center">
             <div className="w-full">
-              <p className="text-4xl font-black">{usdExact.format(total)}</p>
-              <Chip tone="green">Up 2.88%</Chip>
+              <div className="mb-3 flex justify-center">
+                <Chip tone="green">Up 2.88%</Chip>
+              </div>
+              <p className="text-4xl font-black leading-tight">{usdExact.format(total)}</p>
               <LineChart className="mt-8 h-[clamp(10rem,20vw,16rem)] w-full" values={rangeSeries(investmentRange, "investment")} color="var(--green)" />
               <RangeTabs value={investmentRange} onChange={setInvestmentRange} />
             </div>
