@@ -6,12 +6,14 @@
 # Local database
 prisma/dev.db
 prisma/dev.db-journal
+prisma/backups/
 
 # Dependencies and build outputs
 node_modules/
 dist/
 build/
 .next/
+*.tsbuildinfo
 
 # Logs
 *.log

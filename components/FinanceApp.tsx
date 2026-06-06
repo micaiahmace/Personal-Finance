@@ -33,7 +33,7 @@ import {
 import { type CSSProperties, type FormEvent, useEffect, useMemo, useState } from "react";
 import { INCOME_CATEGORY_ID, categorySpendMap, categorySpentFromMap, expenseEntries, goalCurrent, groupTotalsFromMap, incomeTotal, isBudgetCategory, isBudgetGroup, monthsUntil, netWorth, percent, projectedDate, ruleMatches, totalBudget, totalSpent, usd, usdExact } from "@/lib/finance";
 import { seedState } from "@/lib/seed-data";
-import type { Account, AccountGroup, AiSuggestion, BudgetCategory, BudgetGroup, FinanceState, Goal, MerchantRule, Transaction, View } from "@/lib/types";
+import type { Account, AccountGroup, AiSuggestion, BudgetCategory, BudgetGroup, FinanceState, Goal, MerchantRule, Recurrence, Transaction, View } from "@/lib/types";
 
 const UI_PREFS_KEY = "personal-finance-ui-v1";
 const accountGroups: AccountGroup[] = ["Credit card", "Depository", "Investment", "Other"];
@@ -88,6 +88,8 @@ type GroupDraft = {
   color: string;
 };
 
+type GoalDraft = Goal;
+
 type SplitDraft = {
   transaction: Transaction;
   firstCategoryId: string;
@@ -105,7 +107,7 @@ type Notice = {
   message: string;
 };
 
-type BulkMenu = "category" | "type" | "more" | null;
+type BulkMenu = "category" | "type" | null;
 type PlaidStatus = {
   configured: boolean;
   env: string;
@@ -290,6 +292,12 @@ function currentMonthKey() {
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
 }
 
+function defaultGoalTargetDate() {
+  const date = new Date();
+  date.setFullYear(date.getFullYear() + 1);
+  return date.toISOString().slice(0, 10);
+}
+
 function transactionMonthKey(transaction: Transaction) {
   return transaction.date.slice(0, 7);
 }
@@ -367,6 +375,57 @@ function groupTransactionsByMonth(transactions: Transaction[]) {
 
 function parseLocalDate(value: string) {
   return new Date(`${value.slice(0, 10)}T00:00:00`);
+}
+
+function parseFriendlyRecurringDate(value: string) {
+  const match = value.match(/^([A-Za-z]{3,9})\s+(\d{1,2})(?:st|nd|rd|th)?(?:,\s*(\d{4}))?$/);
+  if (!match) return null;
+
+  const month = new Date(`${match[1]} 1, 2026`).getMonth();
+  const day = Number(match[2]);
+  const year = match[3] ? Number(match[3]) : new Date().getFullYear();
+  const date = new Date(year, month, day);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function baseRecurrenceDate(recurrence: Recurrence) {
+  if (recurrence.nextDate) {
+    const date = parseLocalDate(recurrence.nextDate);
+    if (!Number.isNaN(date.getTime())) return date;
+  }
+
+  return parseFriendlyRecurringDate(recurrence.date) || new Date();
+}
+
+function recurrenceNextHitDate(recurrence: Recurrence) {
+  const next = baseRecurrenceDate(recurrence);
+  const today = new Date();
+  const todayStart = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  const cadence = recurrence.cadence.toLowerCase();
+
+  while (next < todayStart) {
+    if (cadence.includes("annual") || cadence.includes("year")) {
+      next.setFullYear(next.getFullYear() + 1);
+    } else if (cadence.includes("biweekly") || cadence.includes("every 2")) {
+      next.setDate(next.getDate() + 14);
+    } else if (cadence.includes("week")) {
+      next.setDate(next.getDate() + 7);
+    } else {
+      next.setMonth(next.getMonth() + 1);
+    }
+  }
+
+  return next;
+}
+
+function formatRecurrenceHitDate(recurrence: Recurrence) {
+  const date = recurrenceNextHitDate(recurrence);
+  const month = date.toLocaleDateString("en-US", { month: "short" });
+  const day = date.getDate();
+  const suffix = day % 10 === 1 && day !== 11 ? "st" : day % 10 === 2 && day !== 12 ? "nd" : day % 10 === 3 && day !== 13 ? "rd" : "th";
+  const year = date.getFullYear();
+  const currentYear = new Date().getFullYear();
+  return `${month} ${day}${suffix}${year === currentYear ? "" : `, ${year}`}`;
 }
 
 function formatStatusDate(value: string) {
@@ -464,6 +523,7 @@ export function FinanceApp() {
   const [transactionDraft, setTransactionDraft] = useState<Transaction | null>(null);
   const [categoryDraft, setCategoryDraft] = useState<CategoryDraft | null>(null);
   const [groupDraft, setGroupDraft] = useState<GroupDraft | null>(null);
+  const [goalDraft, setGoalDraft] = useState<GoalDraft | null>(null);
   const [splitDraft, setSplitDraft] = useState<SplitDraft | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [selectedCategoryId, setSelectedCategoryId] = useState<string | null>(null);
@@ -492,6 +552,12 @@ export function FinanceApp() {
   const budgetMonthTransactions = useMemo(() => transactionsInMonth(state.transactions, budgetMonthKey), [budgetMonthKey, state.transactions]);
   const spendByCategory = useMemo(() => categorySpendMap(budgetMonthTransactions), [budgetMonthTransactions]);
   const recurringByCategory = useMemo(() => recurringAmountMap(state.recurrences), [state.recurrences]);
+  const sortedRecurrences = useMemo(() => (
+    [...state.recurrences].sort((a, b) => (
+      recurrenceNextHitDate(a).getTime() - recurrenceNextHitDate(b).getTime() ||
+      a.merchant.localeCompare(b.merchant)
+    ))
+  ), [state.recurrences]);
   const totalBudgetAmount = useMemo(() => totalBudget(sortedBudgetCategories), [sortedBudgetCategories]);
   const totalSpentAmount = useMemo(() => totalSpent(budgetMonthTransactions), [budgetMonthTransactions]);
   const netWorthAmount = useMemo(() => netWorth(state.accounts), [state.accounts]);
@@ -907,6 +973,21 @@ export function FinanceApp() {
     });
   }
 
+  function openGoalModal(goal?: Goal) {
+    setGoalDraft(goal ? { ...goal } : {
+      id: "",
+      name: "House fund",
+      icon: "H",
+      targetAmount: 0,
+      currentAmount: 0,
+      targetDate: defaultGoalTargetDate(),
+      accountId: "",
+      priority: "Medium",
+      notes: "",
+      status: "Active"
+    });
+  }
+
   function saveCategory(draft: CategoryDraft) {
     commit((stateDraft) => {
       if (draft.id) {
@@ -943,6 +1024,39 @@ export function FinanceApp() {
       }
     });
     setGroupDraft(null);
+  }
+
+  function saveGoal(draft: GoalDraft) {
+    const savedGoal: Goal = {
+      id: draft.id || uid("goal"),
+      name: draft.name.trim(),
+      icon: draft.icon.trim() || "G",
+      targetAmount: Math.max(Number(draft.targetAmount) || 0, 0),
+      currentAmount: Math.max(Number(draft.currentAmount) || 0, 0),
+      targetDate: draft.targetDate || defaultGoalTargetDate(),
+      accountId: draft.accountId || "",
+      priority: draft.priority,
+      notes: draft.notes.trim(),
+      status: draft.status
+    };
+
+    if (!savedGoal.name || savedGoal.targetAmount <= 0) return;
+
+    commit((stateDraft) => {
+      const target = stateDraft.goals.find((goal) => goal.id === savedGoal.id);
+      if (target) {
+        Object.assign(target, savedGoal);
+      } else {
+        stateDraft.goals.push(savedGoal);
+      }
+    });
+    setGoalDraft(null);
+  }
+
+  function deleteGoal(goalId: string) {
+    commit((stateDraft) => {
+      stateDraft.goals = stateDraft.goals.filter((goal) => goal.id !== goalId);
+    });
   }
 
   function saveTransaction(transaction: Transaction) {
@@ -1211,7 +1325,6 @@ export function FinanceApp() {
           openMenu={bulkMenu}
           setOpenMenu={setBulkMenu}
           onClear={clearTransactionSelection}
-          onSelectAll={() => setSelectedTransactionIds(bulkVisibleTransactionIds)}
           onCategory={(categoryId) => assignSelectedCategory(categoryId, selectedVisibleTransactionIds)}
           onType={(type) => assignSelectedType(type, selectedVisibleTransactionIds)}
           onExclude={() => excludeSelectedTransactions(selectedVisibleTransactionIds)}
@@ -1223,6 +1336,7 @@ export function FinanceApp() {
       {transactionDraft ? <TransactionModal transaction={transactionDraft} accounts={state.accounts} categories={allSortedCategories} onClose={() => setTransactionDraft(null)} onSave={saveTransaction} /> : null}
       {categoryDraft ? <CategoryModal draft={categoryDraft} groups={sortedBudgetGroups} setDraft={setCategoryDraft} onClose={() => setCategoryDraft(null)} onSave={saveCategory} /> : null}
       {groupDraft ? <GroupModal draft={groupDraft} setDraft={setGroupDraft} onClose={() => setGroupDraft(null)} onSave={saveGroup} /> : null}
+      {goalDraft ? <GoalModal draft={goalDraft} accounts={state.accounts} setDraft={setGoalDraft} onClose={() => setGoalDraft(null)} onSave={saveGoal} /> : null}
       {splitDraft ? <SplitModal draft={splitDraft} categories={sortedBudgetCategories} setDraft={setSplitDraft} onClose={() => setSplitDraft(null)} onSave={saveSplit} /> : null}
       {notice ? <NoticeModal notice={notice} onClose={() => setNotice(null)} /> : null}
     </div>
@@ -1259,8 +1373,8 @@ export function FinanceApp() {
             <div className="flex min-h-[clamp(18rem,32vw,24rem)] items-center text-center">
               <div className="w-full">
                 <p className="font-bold text-[var(--muted)]">Net worth</p>
-                <p className="mt-1 text-4xl font-black">{usd.format(netWorthAmount)}</p>
-                <Chip tone="red">Down 10.59%</Chip>
+                <div className="mt-3"><Chip tone="red">Down 10.59%</Chip></div>
+                <p className="mt-3 text-4xl font-black">{usd.format(netWorthAmount)}</p>
                 <NetWorthDashboardChart className="mt-8 h-[clamp(9rem,16vw,13rem)] w-full" range={netWorthRange} />
                 <RangeTabs value={netWorthRange} onChange={setNetWorthRange} />
               </div>
@@ -1309,8 +1423,8 @@ export function FinanceApp() {
               }, () => bulkPatchTransactions({ updates: reviewTransactions.map((transaction) => ({ id: transaction.id, reviewed: true })) }))}
             />
           </Panel>
-          <Panel title="Next two weeks" action="Recurrings" onAction={() => setUi({ view: "recurrings" })}>
-            <div className="space-y-3">{state.recurrences.slice(0, 3).map(renderRecurrenceRow)}</div>
+          <Panel title="Next up" action="Recurrings" onAction={() => setUi({ view: "recurrings" })}>
+            <div className="space-y-3">{sortedRecurrences.slice(0, 3).map(renderRecurrenceRow)}</div>
           </Panel>
         </div>
       </div>
@@ -1594,8 +1708,8 @@ export function FinanceApp() {
           <div className="flex min-h-[clamp(18rem,30vw,23rem)] items-center text-center">
             <div className="w-full">
               <div className="text-sm font-black text-blue-300">Net worth</div>
-              <div className="mt-1 text-3xl font-black tracking-tight">{usdExact.format(worth)}</div>
               <div className="mt-3"><Chip tone="red">Down 10.59%</Chip></div>
+              <div className="mt-3 text-3xl font-black tracking-tight">{usdExact.format(worth)}</div>
               <LineChart className="mt-8 h-[clamp(10rem,18vw,15rem)] w-full" values={rangeSeries(netWorthRange, "netPrimary")} color="#5ea7ff" secondValues={rangeSeries(netWorthRange, "netSecondary")} secondColor="#ff8558" />
               <RangeTabs value={netWorthRange} onChange={setNetWorthRange} />
             </div>
@@ -1677,8 +1791,8 @@ export function FinanceApp() {
   function renderRecurrings() {
     return (
       <div className="fade-in grid gap-6 xl:grid-cols-2">
-        <Panel title="Recurring charges" action="Scan local">
-          <div className="space-y-3">{state.recurrences.map(renderRecurrenceRow)}</div>
+        <Panel title="Recurring charges">
+          <div className="space-y-3">{sortedRecurrences.map(renderRecurrenceRow)}</div>
         </Panel>
         <Panel title="Monthly impact">
           <Metric label="Recurring total" value={usdExact.format(state.recurrences.reduce((sum, recurrence) => sum + recurrence.amount, 0))} tone="orange" />
@@ -1688,7 +1802,7 @@ export function FinanceApp() {
     );
   }
 
-  function renderRecurrenceRow(recurrence: { id: string; date: string; merchant: string; cadence: string; amount: number; categoryId: string }) {
+  function renderRecurrenceRow(recurrence: Recurrence) {
     const category = categoriesById.get(recurrence.categoryId);
     return (
       <div key={recurrence.id} className="compact-panel grid gap-3 p-4 md:grid-cols-[1fr_auto] md:items-center">
@@ -1696,7 +1810,7 @@ export function FinanceApp() {
           <span className="grid h-10 w-10 place-items-center rounded-2xl bg-[var(--surface-2)]">{category?.icon || "\u25c7"}</span>
           <div>
             <div className="font-black">{recurrence.merchant} <span className="font-bold text-[var(--muted)]">{recurrence.cadence}</span></div>
-            <div className="text-sm text-[var(--muted)]">{recurrence.date} {"\u2022"} {category?.name || "Uncategorized"}</div>
+            <div className="text-sm text-[var(--muted)]">{formatRecurrenceHitDate(recurrence)} {"\u2022"} {category?.name || "Uncategorized"}</div>
           </div>
         </div>
         <strong>{usdExact.format(recurrence.amount)}</strong>
@@ -1711,14 +1825,27 @@ export function FinanceApp() {
       <div className="fade-in space-y-6">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <h2 className="text-xl font-black">Goals dashboard</h2>
-          <Button onClick={() => setNotice({ title: "Heads up", message: "Goal form is next after live account sync." })}><Plus size={16} /> Goal</Button>
+          <Button onClick={() => openGoalModal()}><Plus size={16} /> Goal</Button>
         </div>
         <div className="grid gap-3 md:grid-cols-3">
           <Metric label="Total saved" value={usdExact.format(totalSaved)} tone="green" />
           <Metric label="Total target" value={usdExact.format(target)} />
           <Metric label="Remaining" value={usdExact.format(Math.max(target - totalSaved, 0))} tone="orange" />
         </div>
-        <div className="grid gap-6 xl:grid-cols-2">{state.goals.map(renderGoalCard)}</div>
+        {state.goals.length ? (
+          <div className="grid gap-6 xl:grid-cols-2">{state.goals.map(renderGoalCard)}</div>
+        ) : (
+          <section className="premium-panel grid min-h-72 place-items-center p-6 text-center">
+            <div>
+              <div className="mx-auto grid h-12 w-12 place-items-center rounded-2xl bg-[var(--surface-2)] text-blue-200"><Target size={22} /></div>
+              <h3 className="mt-4 text-xl font-black">No goals yet</h3>
+              <div className="mt-5 flex flex-wrap justify-center gap-2">
+                <Button onClick={() => openGoalModal()}><Plus size={16} /> Create goal</Button>
+                <Button variant="secondary" onClick={connectModal}><Landmark size={16} /> Connect account</Button>
+              </div>
+            </div>
+          </section>
+        )}
       </div>
     );
   }
@@ -1733,9 +1860,15 @@ export function FinanceApp() {
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <div className="flex items-center gap-3 text-lg font-black"><span className="grid h-10 w-10 place-items-center rounded-2xl bg-[var(--surface-2)]">{goal.icon}</span>{goal.name}</div>
-            <div className="mt-2 text-sm font-bold text-[var(--muted)]">{account?.name || "No account assigned"} {"\u2022"} {goal.status} {"\u2022"} {goal.priority}</div>
+            <div className="mt-2 text-sm font-bold text-[var(--muted)]">
+              {account ? `${accountDisplayName(account)} ${account.last4}` : "Manual balance"} {"\u2022"} {goal.status} {"\u2022"} {goal.priority}
+            </div>
           </div>
-          <Chip tone={goal.status === "Active" ? "green" : "blue"}>{goal.status}</Chip>
+          <div className="flex items-center gap-2">
+            <Chip tone={goal.status === "Active" ? "green" : "blue"}>{account ? "Synced" : goal.status}</Chip>
+            <IconButton label="Edit goal" onClick={() => openGoalModal(goal)}><Edit3 size={14} /></IconButton>
+            <IconButton label="Delete goal" onClick={() => deleteGoal(goal.id)}><Trash2 size={14} /></IconButton>
+          </div>
         </div>
         <div className="mt-5"><Progress spent={current} budget={goal.targetAmount} color="var(--green)" mode="solid" /></div>
         <div className="mt-4 grid gap-3 md:grid-cols-3">
@@ -1786,20 +1919,39 @@ export function FinanceApp() {
   }
 
   function renderTopCategories() {
+    const topCategories = sortedBudgetCategories
+      .map((category) => ({
+        category,
+        spent: categorySpentFromMap(spendByCategory, category.id),
+        recurring: recurringAmountFromMap(recurringByCategory, category.id),
+        group: state.groups.find((item) => item.id === category.groupId)
+      }))
+      .sort((a, b) => (
+        b.spent - a.spent ||
+        b.category.budget - a.category.budget ||
+        a.category.order - b.category.order
+      ))
+      .slice(0, 5);
+
     return (
       <div className="space-y-2">
-        {sortedBudgetGroups.map((group) => {
-          const totals = groupTotalsFromMap(state.categories, spendByCategory, group.id);
-          const recurring = groupRecurringAmountFromMap(state.categories, recurringByCategory, group.id);
-          return (
-            <div key={group.id} className="grid gap-3 rounded-2xl border border-[var(--line)] bg-[var(--surface)] p-3 md:grid-cols-[minmax(150px,1fr)_90px_minmax(160px,1fr)_90px] md:items-center">
-              <div className="flex items-center gap-2 font-black"><ChevronRight size={14} style={{ color: group.color }} />{group.name}</div>
-              <div className="text-right font-black">{usd.format(totals.spent)}</div>
-              <Progress spent={totals.spent} budget={totals.budget} recurring={recurring} />
-              <div className="text-right font-black">{usd.format(totals.budget)}</div>
+        {topCategories.map(({ category, spent, recurring, group }) => (
+          <button
+            key={category.id}
+            type="button"
+            className="grid w-full gap-3 rounded-2xl border border-[var(--line)] bg-[var(--surface)] p-3 text-left transition hover:bg-[var(--surface-2)] md:grid-cols-[minmax(150px,1fr)_90px_minmax(160px,1fr)_90px] md:items-center"
+            onClick={() => openCategoryTransactions(category)}
+          >
+            <div className="flex min-w-0 items-center gap-2 font-black">
+              <span className="grid h-7 w-7 shrink-0 place-items-center rounded-md bg-[var(--surface-2)]">{category.icon}</span>
+              <span className="truncate">{category.name}</span>
+              {group ? <ChevronRight size={14} className="ml-auto shrink-0" style={{ color: group.color }} /> : null}
             </div>
-          );
-        })}
+            <div className="text-right font-black">{usd.format(spent)}</div>
+            <Progress spent={spent} budget={category.budget} recurring={recurring} />
+            <div className="text-right font-black">{usd.format(category.budget)}</div>
+          </button>
+        ))}
       </div>
     );
   }
@@ -1885,37 +2037,42 @@ function SpendingDashboardChart({
       day,
       value,
       x: 4 + ((day - 1) / Math.max(1, daysInMonth - 1)) * 92,
-      y: valueY(value, maxChartValue),
-      paceValue: budget * (day / daysInMonth)
+      y: valueY(value, maxChartValue)
     };
   });
 
-  const lastPoint = actualPoints.at(-1) ?? { x: 4, y: valueY(0, maxChartValue), value: 0, paceValue: 0 };
+  const lastPoint = actualPoints.at(-1) ?? { x: 4, y: valueY(0, maxChartValue), value: 0 };
   const over = spent > budget;
   const label = over ? `${usdExact.format(spent - budget)} over` : `${usd.format(budget - spent)} left`;
-  const badgeColor = budgetHealthColor(lastPoint.value, lastPoint.paceValue, budget);
+  const actualPath = actualPoints.map(pointPair).join(" ");
+  const badgeColor = over ? HEALTH_PALETTE.red : progressHealthColor(lastPoint.value, budget);
+  const firstActualX = actualPoints[0]?.x ?? 4;
+  const actualWidth = Math.max(1, lastPoint.x - firstActualX);
+  const actualGradientStops = actualPoints.length > 1
+    ? actualPoints.map((point) => ({
+      offset: `${Math.max(0, Math.min(100, ((point.x - firstActualX) / actualWidth) * 100))}%`,
+      color: over ? HEALTH_PALETTE.red : progressHealthColor(point.value, budget)
+    }))
+    : [
+      { offset: "0%", color: badgeColor },
+      { offset: "100%", color: badgeColor }
+    ];
 
   return (
     <div className={`relative ${className ?? "h-44 w-full"}`}>
       <svg className="h-full w-full overflow-visible" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
-        <line x1={budgetLine.x1} x2={budgetLine.x2} y1={budgetLine.y1} y2={budgetLine.y2} stroke="#12365d" strokeWidth="2" strokeDasharray="3 5" vectorEffect="non-scaling-stroke" />
-        {actualPoints.map((point, index) => {
-          const previous = actualPoints[index - 1];
-          if (!previous) return null;
-          return (
-            <line
-              key={`${previous.day}-${point.day}`}
-              x1={previous.x}
-              y1={previous.y}
-              x2={point.x}
-              y2={point.y}
-              stroke={budgetHealthColor(point.value, point.paceValue, budget)}
-              strokeWidth="3"
-              strokeLinecap="round"
-              vectorEffect="non-scaling-stroke"
-            />
-          );
-        })}
+        <defs>
+          <linearGradient id="spending-actual-flow" x1="0%" x2="100%" y1="0%" y2="0%">
+            {actualGradientStops.map((stop, index) => (
+              <stop key={`${stop.offset}-${index}`} offset={stop.offset} stopColor={stop.color} />
+            ))}
+          </linearGradient>
+        </defs>
+        {budget > 0 ? (
+          <line x1={budgetLine.x1} x2={budgetLine.x2} y1={budgetLine.y1} y2={budgetLine.y2} stroke="#12365d" strokeWidth="2" strokeDasharray="3 5" vectorEffect="non-scaling-stroke" />
+        ) : null}
+        <polyline points={actualPath} fill="none" stroke={over ? HEALTH_PALETTE.red : "url(#spending-actual-flow)"} strokeWidth="5" strokeLinecap="round" strokeLinejoin="round" strokeOpacity="0.16" vectorEffect="non-scaling-stroke" />
+        <polyline points={actualPath} fill="none" stroke={over ? HEALTH_PALETTE.red : "url(#spending-actual-flow)"} strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round" vectorEffect="non-scaling-stroke" />
       </svg>
       <span
         className="pointer-events-none absolute h-2.5 w-2.5 -translate-x-1/2 -translate-y-1/2 rounded-full border-2"
@@ -1951,14 +2108,6 @@ const HEALTH_STOPS = [
   { ratio: 0.88, color: HEALTH_PALETTE.yellow },
   { ratio: 1, color: HEALTH_PALETTE.orange }
 ];
-
-function budgetHealthColor(actual: number, pace: number, budget = 0) {
-  if (budget > 0 && actual > budget) return HEALTH_PALETTE.red;
-  if (pace <= 0 && actual > 0) return HEALTH_PALETTE.orange;
-  if (pace <= 0) return HEALTH_PALETTE.green;
-
-  return blendedHealthColor(actual / pace);
-}
 
 function NetWorthDashboardChart({ className, range }: { className?: string; range: TimeRange }) {
   const primary = chartPoints(rangeSeries(range, "netPrimary"), 34, 20);
@@ -2295,7 +2444,6 @@ function BulkTransactionBar({
   openMenu,
   setOpenMenu,
   onClear,
-  onSelectAll,
   onCategory,
   onType,
   onExclude,
@@ -2307,7 +2455,6 @@ function BulkTransactionBar({
   openMenu: BulkMenu;
   setOpenMenu: (menu: BulkMenu) => void;
   onClear: () => void;
-  onSelectAll: () => void;
   onCategory: (categoryId: string | null) => void;
   onType: (type: "transaction" | "transfer") => void;
   onExclude: () => void;
@@ -2316,70 +2463,62 @@ function BulkTransactionBar({
 }) {
   return (
     <div className="fixed inset-x-0 bottom-5 z-40 flex justify-center px-4">
-      <div className="relative flex max-w-[calc(100vw-2rem)] items-center gap-2 rounded-2xl border border-[var(--line)] bg-[color:color-mix(in_srgb,var(--surface)_94%,black_6%)] p-2 shadow-soft backdrop-blur-xl">
-        <button type="button" className="grid h-9 w-9 place-items-center rounded-xl border border-[var(--line)] bg-[var(--surface-2)] text-[var(--muted)] hover:text-[var(--text)]" onClick={onClear} aria-label="Clear selection">
-          <X size={16} />
-        </button>
-        <div className="min-w-24 px-2 text-sm font-black">{selectedCount} selected</div>
-
-        <div className="relative">
-          <button type="button" className="flex items-center gap-2 rounded-xl border border-[var(--line)] bg-[var(--surface-2)] px-3 py-2 text-sm font-black hover:bg-[var(--surface-3)]" onClick={() => setOpenMenu(openMenu === "category" ? null : "category")}>
-            <CircleDollarSign size={16} /> Category
+      <div className="relative grid max-w-[calc(100vw-2rem)] gap-2 rounded-2xl border border-[var(--line)] bg-[color:color-mix(in_srgb,var(--surface)_94%,black_6%)] p-2 shadow-soft backdrop-blur-xl">
+        <div className="flex flex-wrap items-center justify-center gap-2">
+          <button type="button" className="grid h-9 w-9 place-items-center rounded-xl border border-[var(--line)] bg-[var(--surface-2)] text-[var(--muted)] hover:text-[var(--text)]" onClick={onClear} aria-label="Clear selection">
+            <X size={16} />
           </button>
-          {openMenu === "category" ? (
-            <div className="absolute bottom-12 left-0 max-h-80 w-64 overflow-y-auto rounded-2xl border border-[var(--line)] bg-[var(--surface)] p-2 shadow-soft">
-              <button type="button" className="w-full rounded-xl px-3 py-2 text-left text-sm font-black text-blue-200 hover:bg-[var(--surface-2)]" onClick={() => onCategory(null)}>
-                Uncategorized
-              </button>
-              {categories.map((category) => (
-                <button key={category.id} type="button" className="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left text-sm font-black hover:bg-[var(--surface-2)]" onClick={() => onCategory(category.id)}>
-                  <span>{category.icon}</span>
-                  <span>{category.name}</span>
+          <div className="min-w-24 px-2 text-sm font-black">{selectedCount} selected</div>
+
+          <div className="relative">
+            <button type="button" className="flex items-center gap-2 rounded-xl border border-[var(--line)] bg-[var(--surface-2)] px-3 py-2 text-sm font-black hover:bg-[var(--surface-3)]" onClick={() => setOpenMenu(openMenu === "category" ? null : "category")}>
+              <CircleDollarSign size={16} /> Category
+            </button>
+            {openMenu === "category" ? (
+              <div className="absolute bottom-12 left-0 max-h-80 w-64 overflow-y-auto rounded-2xl border border-[var(--line)] bg-[var(--surface)] p-2 shadow-soft">
+                <button type="button" className="w-full rounded-xl px-3 py-2 text-left text-sm font-black text-blue-200 hover:bg-[var(--surface-2)]" onClick={() => onCategory(null)}>
+                  Uncategorized
                 </button>
-              ))}
-            </div>
-          ) : null}
+                {categories.map((category) => (
+                  <button key={category.id} type="button" className="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left text-sm font-black hover:bg-[var(--surface-2)]" onClick={() => onCategory(category.id)}>
+                    <span>{category.icon}</span>
+                    <span>{category.name}</span>
+                  </button>
+                ))}
+              </div>
+            ) : null}
+          </div>
+
+          <div className="relative">
+            <button type="button" className="flex items-center gap-2 rounded-xl border border-[var(--line)] bg-[var(--surface-2)] px-3 py-2 text-sm font-black hover:bg-[var(--surface-3)]" onClick={() => setOpenMenu(openMenu === "type" ? null : "type")}>
+              <ArrowDownUp size={16} /> Type
+            </button>
+            {openMenu === "type" ? (
+              <div className="absolute bottom-12 left-0 w-56 rounded-2xl border border-[var(--line)] bg-[var(--surface)] p-2 shadow-soft">
+                <button type="button" className="w-full rounded-xl px-3 py-2 text-left text-sm font-black hover:bg-[var(--surface-2)]" onClick={() => onType("transaction")}>
+                  Transaction
+                </button>
+                <button type="button" className="w-full rounded-xl px-3 py-2 text-left text-sm font-black text-blue-200 hover:bg-[var(--surface-2)]" onClick={() => onType("transfer")}>
+                  Internal transfer
+                </button>
+              </div>
+            ) : null}
+          </div>
         </div>
 
-        <div className="relative">
-          <button type="button" className="flex items-center gap-2 rounded-xl border border-[var(--line)] bg-[var(--surface-2)] px-3 py-2 text-sm font-black hover:bg-[var(--surface-3)]" onClick={() => setOpenMenu(openMenu === "type" ? null : "type")}>
-            <ArrowDownUp size={16} /> Type
+        <div className="flex flex-wrap justify-center gap-2 border-t border-[var(--line)] pt-2">
+          <button type="button" className="rounded-xl px-3 py-2 text-sm font-black hover:bg-[var(--surface-2)]" onClick={onClear}>
+            Unselect all
           </button>
-          {openMenu === "type" ? (
-            <div className="absolute bottom-12 left-0 w-56 rounded-2xl border border-[var(--line)] bg-[var(--surface)] p-2 shadow-soft">
-              <button type="button" className="w-full rounded-xl px-3 py-2 text-left text-sm font-black hover:bg-[var(--surface-2)]" onClick={() => onType("transaction")}>
-                Transaction
-              </button>
-              <button type="button" className="w-full rounded-xl px-3 py-2 text-left text-sm font-black text-blue-200 hover:bg-[var(--surface-2)]" onClick={() => onType("transfer")}>
-                Internal transfer
-              </button>
-            </div>
-          ) : null}
-        </div>
-
-        <div className="relative">
-          <button type="button" className="grid h-9 min-w-10 place-items-center rounded-xl border border-[var(--line)] bg-[var(--surface-2)] px-3 text-sm font-black hover:bg-[var(--surface-3)]" onClick={() => setOpenMenu(openMenu === "more" ? null : "more")} aria-label="More bulk actions">
-            ...
+          <button type="button" className="flex items-center gap-2 rounded-xl px-3 py-2 text-sm font-black text-emerald-200 hover:bg-emerald-500/10" onClick={onReview}>
+            <Check size={15} /> Mark reviewed
           </button>
-          {openMenu === "more" ? (
-            <div className="absolute bottom-12 right-0 w-44 rounded-2xl border border-[var(--line)] bg-[var(--surface)] p-2 shadow-soft">
-              <button type="button" className="w-full rounded-xl px-3 py-2 text-left text-sm font-black hover:bg-[var(--surface-2)]" onClick={onSelectAll}>
-                Select all
-              </button>
-              <button type="button" className="w-full rounded-xl px-3 py-2 text-left text-sm font-black hover:bg-[var(--surface-2)]" onClick={onClear}>
-                Unselect all
-              </button>
-              <button type="button" className="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left text-sm font-black text-emerald-200 hover:bg-emerald-500/10" onClick={onReview}>
-                <Check size={15} /> Mark reviewed
-              </button>
-              <button type="button" className="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left text-sm font-black text-amber-200 hover:bg-amber-500/10" onClick={onExclude}>
-                <X size={15} /> Exclude from spending
-              </button>
-              <button type="button" className="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left text-sm font-black text-red-300 hover:bg-red-500/10" onClick={onDelete}>
-                <Trash2 size={15} /> Delete
-              </button>
-            </div>
-          ) : null}
+          <button type="button" className="flex items-center gap-2 rounded-xl px-3 py-2 text-sm font-black text-amber-200 hover:bg-amber-500/10" onClick={onExclude}>
+            <X size={15} /> Exclude from spending
+          </button>
+          <button type="button" className="flex items-center gap-2 rounded-xl px-3 py-2 text-sm font-black text-red-300 hover:bg-red-500/10" onClick={onDelete}>
+            <Trash2 size={15} /> Delete
+          </button>
         </div>
       </div>
     </div>
@@ -2648,6 +2787,78 @@ function GroupModal({ draft, setDraft, onClose, onSave }: { draft: GroupDraft; s
           </Label>
         </div>
         <ModalFooter onClose={onClose} submitLabel="Save group" />
+      </form>
+    </div>
+  );
+}
+
+function GoalModal({ draft, accounts, setDraft, onClose, onSave }: { draft: GoalDraft; accounts: Account[]; setDraft: (draft: GoalDraft | null) => void; onClose: () => void; onSave: (draft: GoalDraft) => void }) {
+  const goalAccounts = accounts.filter((account) => account.group !== "Credit card" || account.id === draft.accountId);
+  const linkedAccount = accounts.find((account) => account.id === draft.accountId);
+  const displayedSaved = linkedAccount ? Math.max(linkedAccount.balance, 0) : draft.currentAmount;
+
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center bg-black/60 p-4 backdrop-blur-sm" onMouseDown={(event) => {
+      if (event.target === event.currentTarget) onClose();
+    }}>
+      <form className="max-h-[calc(100vh-2rem)] w-[min(640px,calc(100vw-2rem))] overflow-y-auto rounded-2xl border border-[var(--line)] bg-[var(--surface)] p-5 shadow-soft soft-scrollbar" onSubmit={(event) => {
+        event.preventDefault();
+        onSave(draft);
+      }}>
+        <ModalHeader title={draft.id ? "Edit goal" : "New goal"} onClose={onClose} />
+        <div className="grid gap-4">
+          <div className="grid gap-4 md:grid-cols-[1fr_96px]">
+            <Label title="Goal name">
+              <input className="w-full rounded-xl border border-[var(--line)] bg-[var(--surface-2)] px-3 py-2 outline-none" value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} />
+            </Label>
+            <Label title="Icon">
+              <input className="w-full rounded-xl border border-[var(--line)] bg-[var(--surface-2)] px-3 py-2 outline-none" value={draft.icon} onChange={(event) => setDraft({ ...draft, icon: event.target.value })} />
+            </Label>
+          </div>
+          <div className="grid gap-4 md:grid-cols-2">
+            <Label title="Target amount">
+              <input className="w-full rounded-xl border border-[var(--line)] bg-[var(--surface-2)] px-3 py-2 outline-none" type="number" min="0" step="100" value={draft.targetAmount} onChange={(event) => setDraft({ ...draft, targetAmount: Number(event.target.value) })} />
+            </Label>
+            <Label title="Target date">
+              <input className="w-full rounded-xl border border-[var(--line)] bg-[var(--surface-2)] px-3 py-2 outline-none" type="date" value={draft.targetDate} onChange={(event) => setDraft({ ...draft, targetDate: event.target.value })} />
+            </Label>
+          </div>
+          <Label title="Linked account">
+            <select className="w-full rounded-xl border border-[var(--line)] bg-[var(--surface-2)] px-3 py-2 outline-none" value={draft.accountId} onChange={(event) => setDraft({ ...draft, accountId: event.target.value })}>
+              <option value="">Manual balance</option>
+              {!goalAccounts.length ? <option value="" disabled>No Plaid accounts connected</option> : null}
+              {goalAccounts.map((account) => (
+                <option key={account.id} value={account.id}>
+                  {accountDisplayName(account)}{account.last4 ? ` ${account.last4}` : ""} - {account.group} - {usdExact.format(Math.max(account.balance, 0))}
+                </option>
+              ))}
+            </select>
+          </Label>
+          <div className="grid gap-4 md:grid-cols-3">
+            <Label title={linkedAccount ? "Synced saved" : "Saved so far"}>
+              <input className="w-full rounded-xl border border-[var(--line)] bg-[var(--surface-2)] px-3 py-2 outline-none disabled:text-[var(--muted)]" type="number" min="0" step="100" value={Number(displayedSaved.toFixed(2))} disabled={Boolean(linkedAccount)} onChange={(event) => setDraft({ ...draft, currentAmount: Number(event.target.value) })} />
+            </Label>
+            <Label title="Priority">
+              <select className="w-full rounded-xl border border-[var(--line)] bg-[var(--surface-2)] px-3 py-2 outline-none" value={draft.priority} onChange={(event) => setDraft({ ...draft, priority: event.target.value as Goal["priority"] })}>
+                <option value="High">High</option>
+                <option value="Medium">Medium</option>
+                <option value="Low">Low</option>
+              </select>
+            </Label>
+            <Label title="Status">
+              <select className="w-full rounded-xl border border-[var(--line)] bg-[var(--surface-2)] px-3 py-2 outline-none" value={draft.status} onChange={(event) => setDraft({ ...draft, status: event.target.value as Goal["status"] })}>
+                <option value="Active">Active</option>
+                <option value="Paused">Paused</option>
+                <option value="Completed">Completed</option>
+                <option value="Archived">Archived</option>
+              </select>
+            </Label>
+          </div>
+          <Label title="Notes">
+            <textarea className="min-h-24 w-full resize-y rounded-xl border border-[var(--line)] bg-[var(--surface-2)] px-3 py-2 outline-none" value={draft.notes} onChange={(event) => setDraft({ ...draft, notes: event.target.value })} />
+          </Label>
+        </div>
+        <ModalFooter onClose={onClose} submitLabel="Save goal" />
       </form>
     </div>
   );

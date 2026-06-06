@@ -65,6 +65,7 @@ export type Transaction = {
 export type Recurrence = {
   id: string;
   date: string;
+  nextDate?: string;
   merchant: string;
   cadence: string;
   amount: number;

@@ -82,6 +82,7 @@ async function readFinanceState(): Promise<FinanceState> {
     recurrences: recurrences.map((recurrence) => ({
       id: recurrence.id,
       date: formatShortDate(recurrence.nextDate),
+      nextDate: recurrence.nextDate.toISOString().slice(0, 10),
       merchant: recurrence.merchant,
       cadence: recurrence.cadence,
       amount: recurrence.amount,
@@ -307,9 +308,23 @@ function parseDate(value: string) {
 }
 
 function parseRecurringDate(recurrence: Recurrence) {
-  const date = Date.parse(recurrence.date.replace(/(st|nd|rd|th)/, ""));
-  if (!Number.isNaN(date)) return new Date(date);
+  if (recurrence.nextDate) return parseDate(recurrence.nextDate);
+
+  const date = parseFriendlyRecurringDate(recurrence.date);
+  if (date) return date;
+
   return new Date("2026-06-01T00:00:00");
+}
+
+function parseFriendlyRecurringDate(value: string) {
+  const match = value.match(/^([A-Za-z]{3,9})\s+(\d{1,2})(?:st|nd|rd|th)?(?:,\s*(\d{4}))?$/);
+  if (!match) return null;
+
+  const month = new Date(`${match[1]} 1, 2026`).getMonth();
+  const day = Number(match[2]);
+  const year = match[3] ? Number(match[3]) : new Date().getFullYear();
+  const date = new Date(year, month, day);
+  return Number.isNaN(date.getTime()) ? null : date;
 }
 
 function formatShortDate(date: Date) {
