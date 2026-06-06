@@ -111,6 +111,9 @@ async function readFinanceState(): Promise<FinanceState> {
 
 async function writeFinanceState(state: FinanceState) {
   await prisma.$transaction(async (tx) => {
+    const existingAccounts = new Map((await tx.account.findMany()).map((account) => [account.id, account]));
+    const existingTransactions = new Map((await tx.transaction.findMany()).map((transaction) => [transaction.id, transaction]));
+
     await tx.transactionSplit.deleteMany();
     await tx.transaction.deleteMany();
     await tx.merchantRule.deleteMany();
@@ -132,13 +135,17 @@ async function writeFinanceState(state: FinanceState) {
 
     await tx.account.createMany({
       data: state.accounts.map((account) => ({
+        plaidAccountId: existingAccounts.get(account.id)?.plaidAccountId || null,
+        plaidItemId: existingAccounts.get(account.id)?.plaidItemId || null,
         id: account.id,
         name: account.name,
+        officialName: existingAccounts.get(account.id)?.officialName || null,
         type: account.group,
         subtype: account.subtype,
         mask: account.last4,
         currentBalance: account.balance,
-        availableBalance: account.available
+        availableBalance: account.available,
+        isoCurrencyCode: existingAccounts.get(account.id)?.isoCurrencyCode || "USD"
       }))
     });
 
@@ -156,15 +163,18 @@ async function writeFinanceState(state: FinanceState) {
     await tx.transaction.createMany({
       data: state.transactions.map((transaction) => ({
         id: transaction.id,
+        plaidTransactionId: existingTransactions.get(transaction.id)?.plaidTransactionId || null,
         accountId: transaction.accountId,
         categoryId: transaction.categoryId,
         date: parseDate(transaction.date),
         name: transaction.name,
         merchantName: transaction.merchant,
         amount: transaction.amount,
+        isoCurrencyCode: existingTransactions.get(transaction.id)?.isoCurrencyCode || "USD",
         reviewed: transaction.reviewed,
         excluded: transaction.excluded,
         internalTransfer: transaction.internal,
+        pending: existingTransactions.get(transaction.id)?.pending || false,
         note: transaction.note
       }))
     });

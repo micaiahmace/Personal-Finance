@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { dataEncryptionConfigured, encryptSensitiveString, safeErrorMessage } from "@/lib/data-safety";
 import { getPlaidClient } from "@/lib/plaid";
+import { syncPlaidItem } from "@/lib/plaid-sync";
 import { prisma } from "@/lib/prisma";
 
 export async function POST(request: Request) {
@@ -32,9 +33,15 @@ export async function POST(request: Request) {
       }
     });
 
+    const sync = await syncPlaidItem(response.data.item_id).catch((error: unknown) => ({
+      deferred: true,
+      error: safeErrorMessage(error, "Plaid connected, but transactions are not ready to sync yet.")
+    }));
+
     return NextResponse.json({
       itemId: response.data.item_id,
-      accessTokenStored: true
+      accessTokenStored: true,
+      sync
     });
   } catch (error) {
     return NextResponse.json({ error: safeErrorMessage(error, "Unable to exchange Plaid token") }, { status: 500 });

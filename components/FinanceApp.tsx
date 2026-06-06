@@ -93,6 +93,30 @@ type Notice = {
 
 type BulkMenu = "category" | "type" | "more" | null;
 
+type PlaidLinkHandler = {
+  open: () => void;
+};
+
+type PlaidLinkMetadata = {
+  institution?: {
+    name?: string;
+  };
+};
+
+type PlaidLinkConfig = {
+  token: string;
+  onSuccess: (publicToken: string, metadata: PlaidLinkMetadata) => void;
+  onExit: (error?: { display_message?: string; error_message?: string } | null) => void;
+};
+
+declare global {
+  interface Window {
+    Plaid?: {
+      create: (config: PlaidLinkConfig) => PlaidLinkHandler;
+    };
+  }
+}
+
 function uid(prefix: string) {
   return `${prefix}-${crypto.randomUUID().slice(0, 8)}`;
 }
@@ -187,6 +211,28 @@ function parseLocalDate(value: string) {
   return new Date(`${value.slice(0, 10)}T00:00:00`);
 }
 
+function loadPlaidLinkScript() {
+  return new Promise<void>((resolve, reject) => {
+    if (typeof window === "undefined") return reject(new Error("Plaid Link can only open in the browser."));
+    if (window.Plaid) return resolve();
+
+    const existing = document.querySelector<HTMLScriptElement>("script[data-plaid-link]");
+    if (existing) {
+      existing.addEventListener("load", () => resolve(), { once: true });
+      existing.addEventListener("error", () => reject(new Error("Plaid Link failed to load.")), { once: true });
+      return;
+    }
+
+    const script = document.createElement("script");
+    script.src = "https://cdn.plaid.com/link/v2/stable/link-initialize.js";
+    script.async = true;
+    script.dataset.plaidLink = "true";
+    script.onload = () => resolve();
+    script.onerror = () => reject(new Error("Plaid Link failed to load."));
+    document.head.appendChild(script);
+  });
+}
+
 async function persistData(nextState: FinanceState) {
   try {
     await fetch("/api/app-data", {
@@ -210,6 +256,7 @@ export function FinanceApp() {
   const [notice, setNotice] = useState<Notice | null>(null);
   const [selectedTransactionIds, setSelectedTransactionIds] = useState<string[]>([]);
   const [bulkMenu, setBulkMenu] = useState<BulkMenu>(null);
+  const [plaidBusy, setPlaidBusy] = useState(false);
   const [aiStatus, setAiStatus] = useState<AiStatus>({ ok: false, label: "AI checking" });
 
   const categoriesById = useMemo(() => new Map(state.categories.map((category) => [category.id, category])), [state.categories]);
@@ -377,9 +424,81 @@ export function FinanceApp() {
     });
   }
 
-  function connectModal() {
-    setSettingsTab("connections");
-    setSettingsOpen(true);
+  async function connectModal() {
+    if (plaidBusy) return;
+    setPlaidBusy(true);
+
+    try {
+      const linkResponse = await fetch("/api/plaid/link-token", { method: "POST" });
+      const linkData = await linkResponse.json();
+      if (!linkResponse.ok || !linkData.link_token) {
+        throw new Error(linkData.error || "Unable to create Plaid link token.");
+      }
+
+      await loadPlaidLinkScript();
+      if (!window.Plaid) throw new Error("Plaid Link is unavailable.");
+
+      const handler = window.Plaid.create({
+        token: linkData.link_token,
+        onSuccess: async (publicToken, metadata) => {
+          try {
+            const exchangeResponse = await fetch("/api/plaid/exchange", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({
+                publicToken,
+                institution: metadata.institution?.name
+              })
+            });
+            const exchangeData = await exchangeResponse.json();
+            if (!exchangeResponse.ok) {
+              throw new Error(exchangeData.error || "Unable to exchange Plaid token.");
+            }
+
+            const dataResponse = await fetch("/api/app-data");
+            const nextData = (await dataResponse.json()) as FinanceState;
+            setState((current) => ({
+              ...nextData,
+              theme: current.theme,
+              view: current.view,
+              selectedAccountId: current.selectedAccountId || nextData.accounts[0]?.id || ""
+            }));
+            setNotice({
+              title: exchangeData.sync?.deferred ? "Account connected" : "Account synced",
+              message: exchangeData.sync?.deferred
+                ? "Plaid connected successfully. Transaction history may take a little longer, so use Sync again in a minute if accounts do not appear yet."
+                : "Plaid connected successfully and synced the first batch of accounts and transactions."
+            });
+          } catch (error) {
+            setNotice({
+              title: "Plaid sync needs attention",
+              message: error instanceof Error ? error.message : "Plaid connected, but the first sync did not finish."
+            });
+          } finally {
+            setPlaidBusy(false);
+          }
+        },
+        onExit: (error) => {
+          setPlaidBusy(false);
+          if (error) {
+            setNotice({
+              title: "Plaid connection stopped",
+              message: error.display_message || error.error_message || "Plaid exited before the account was connected."
+            });
+          }
+        }
+      });
+
+      handler.open();
+    } catch (error) {
+      setPlaidBusy(false);
+      setSettingsTab("connections");
+      setSettingsOpen(true);
+      setNotice({
+        title: "Plaid is not ready yet",
+        message: error instanceof Error ? error.message : "Check your Plaid keys and try again."
+      });
+    }
   }
 
   function openCategoryModal(category?: BudgetCategory) {
@@ -565,7 +684,7 @@ export function FinanceApp() {
             </nav>
             <div className="flex items-center gap-2">
               <AiStatusPill status={aiStatus} />
-              <Button variant="secondary" onClick={connectModal}><Database size={16} /> Connect</Button>
+              <Button variant="secondary" onClick={connectModal}><Database size={16} /> {plaidBusy ? "Connecting" : "Connect"}</Button>
               <IconButton label="Toggle theme" onClick={() => setUi({ theme: state.theme === "dark" ? "light" : "dark" })}>
                 {state.theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
               </IconButton>
