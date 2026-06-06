@@ -31,7 +31,7 @@ import {
   X
 } from "lucide-react";
 import { type CSSProperties, type FormEvent, useEffect, useMemo, useState } from "react";
-import { INCOME_CATEGORY_ID, categorySpendMap, categorySpentFromMap, expenseEntries, goalCurrent, groupTotalsFromMap, isBudgetCategory, isBudgetGroup, monthsUntil, netWorth, percent, projectedDate, ruleMatches, totalBudget, totalSpent, usd, usdExact } from "@/lib/finance";
+import { INCOME_CATEGORY_ID, categorySpendMap, categorySpentFromMap, expenseEntries, goalCurrent, groupTotalsFromMap, incomeTotal, isBudgetCategory, isBudgetGroup, monthsUntil, netWorth, percent, projectedDate, ruleMatches, totalBudget, totalSpent, usd, usdExact } from "@/lib/finance";
 import { seedState } from "@/lib/seed-data";
 import type { Account, AccountGroup, AiSuggestion, BudgetCategory, BudgetGroup, FinanceState, Goal, MerchantRule, Transaction, View } from "@/lib/types";
 
@@ -42,6 +42,9 @@ type TimeRange = "1W" | "1M" | "3M" | "YTD" | "1Y" | "ALL";
 type SeriesKind = "netPrimary" | "netSecondary" | "investment";
 
 const timeRanges: TimeRange[] = ["1W", "1M", "3M", "YTD", "1Y", "ALL"];
+const percentFormatter = new Intl.NumberFormat("en-US", {
+  maximumFractionDigits: 1
+});
 
 const nav = [
   { id: "dashboard", label: "Dashboard", icon: BarChart3 },
@@ -189,6 +192,10 @@ function loadPendingPlaidExchange() {
 function clearPendingPlaidExchange() {
   if (typeof window === "undefined") return;
   window.sessionStorage.removeItem(PENDING_PLAID_EXCHANGE_KEY);
+}
+
+function formatRate(value: number) {
+  return `${percentFormatter.format(value)}%`;
 }
 
 function sortedGroups(groups: BudgetGroup[]) {
@@ -501,6 +508,26 @@ export function FinanceApp() {
       .filter((transaction) => !search || `${transaction.name} ${transaction.merchant} ${transaction.note}`.toLowerCase().includes(search))
       .sort((a, b) => b.date.localeCompare(a.date));
   }, [state.categoryFilter, state.search, state.transactions]);
+  const selectedCategoryRegisterTransactions = useMemo(() => {
+    if (!selectedCategory) return [];
+
+    const search = state.search.toLowerCase();
+    return [...state.transactions]
+      .filter((transaction) => transactionHasCategory(transaction, selectedCategory.id))
+      .filter((transaction) => transactionMonthKey(transaction) === budgetMonthKey)
+      .filter((transaction) => !search || `${transaction.name} ${transaction.merchant} ${transaction.note}`.toLowerCase().includes(search))
+      .sort((a, b) => b.date.localeCompare(a.date));
+  }, [budgetMonthKey, selectedCategory, state.search, state.transactions]);
+  const bulkVisibleTransactionIds = useMemo(() => {
+    if (state.view === "transactions") return filteredTransactions.map((transaction) => transaction.id);
+    if (state.view === "categories" && selectedCategory) return selectedCategoryRegisterTransactions.map((transaction) => transaction.id);
+    return [];
+  }, [filteredTransactions, selectedCategory, selectedCategoryRegisterTransactions, state.view]);
+  const bulkVisibleTransactionIdSet = useMemo(() => new Set(bulkVisibleTransactionIds), [bulkVisibleTransactionIds]);
+  const selectedVisibleTransactionIds = useMemo(
+    () => selectedTransactionIds.filter((id) => bulkVisibleTransactionIdSet.has(id)),
+    [bulkVisibleTransactionIdSet, selectedTransactionIds]
+  );
 
   useEffect(() => {
     let alive = true;
@@ -1019,6 +1046,33 @@ export function FinanceApp() {
     clearTransactionSelection();
   }
 
+  function excludeSelectedTransactions(transactionIds = selectedTransactionIds) {
+    const selected = new Set(transactionIds);
+    const updates = transactionIds.map((id) => ({ id, excluded: true, reviewed: true }));
+    commit((draft) => {
+      draft.transactions.forEach((transaction) => {
+        if (selected.has(transaction.id)) {
+          transaction.excluded = true;
+          transaction.reviewed = true;
+        }
+      });
+    }, () => bulkPatchTransactions({ updates }));
+    clearTransactionSelection();
+  }
+
+  function reviewSelectedTransactions(transactionIds = selectedTransactionIds) {
+    const selected = new Set(transactionIds);
+    const updates = transactionIds.map((id) => ({ id, reviewed: true }));
+    commit((draft) => {
+      draft.transactions.forEach((transaction) => {
+        if (selected.has(transaction.id)) {
+          transaction.reviewed = true;
+        }
+      });
+    }, () => bulkPatchTransactions({ updates }));
+    clearTransactionSelection();
+  }
+
   function deleteSelectedTransactions(transactionIds = selectedTransactionIds) {
     const selected = new Set(transactionIds);
     const deleteIds = [...transactionIds];
@@ -1053,6 +1107,7 @@ export function FinanceApp() {
     rules: renderRules,
     ai: renderDashboard
   };
+  const compactCategoryList = state.view === "categories" && !selectedCategory;
 
   return (
     <div className={`${state.theme === "light" ? "light" : ""} min-h-screen bg-[var(--bg)] text-[var(--text)]`}>
@@ -1124,7 +1179,7 @@ export function FinanceApp() {
               </IconButton>
             </div>
           </header>
-          <section className="px-4 py-6 pb-24 md:px-7">{pages[state.view]()}</section>
+          <section className={`px-4 pb-24 md:px-7 ${compactCategoryList ? "py-3" : "py-6"}`}>{pages[state.view]()}</section>
         </main>
       </div>
 
@@ -1149,6 +1204,21 @@ export function FinanceApp() {
           })}
         />
       ) : null}
+      {selectedVisibleTransactionIds.length ? (
+        <BulkTransactionBar
+          selectedCount={selectedVisibleTransactionIds.length}
+          categories={allSortedCategories}
+          openMenu={bulkMenu}
+          setOpenMenu={setBulkMenu}
+          onClear={clearTransactionSelection}
+          onSelectAll={() => setSelectedTransactionIds(bulkVisibleTransactionIds)}
+          onCategory={(categoryId) => assignSelectedCategory(categoryId, selectedVisibleTransactionIds)}
+          onType={(type) => assignSelectedType(type, selectedVisibleTransactionIds)}
+          onExclude={() => excludeSelectedTransactions(selectedVisibleTransactionIds)}
+          onReview={() => reviewSelectedTransactions(selectedVisibleTransactionIds)}
+          onDelete={() => deleteSelectedTransactions(selectedVisibleTransactionIds)}
+        />
+      ) : null}
       {ruleDraft ? <RuleModal draft={ruleDraft} categories={allSortedCategories} accounts={state.accounts} transactions={state.transactions} setDraft={setRuleDraft} onClose={() => setRuleDraft(null)} onSave={saveRule} /> : null}
       {transactionDraft ? <TransactionModal transaction={transactionDraft} accounts={state.accounts} categories={allSortedCategories} onClose={() => setTransactionDraft(null)} onSave={saveTransaction} /> : null}
       {categoryDraft ? <CategoryModal draft={categoryDraft} groups={sortedBudgetGroups} setDraft={setCategoryDraft} onClose={() => setCategoryDraft(null)} onSave={saveCategory} /> : null}
@@ -1163,6 +1233,11 @@ export function FinanceApp() {
     const spent = totalSpentAmount;
     const remainingBudget = budget - spent;
     const overBudget = remainingBudget < 0;
+    const monthlyIncome = incomeTotal(budgetMonthTransactions);
+    const monthlySavings = monthlyIncome - spent;
+    const savingsRate = monthlyIncome > 0 ? (monthlySavings / monthlyIncome) * 100 : 0;
+    const savingsRateLabel = monthlyIncome > 0 ? formatRate(savingsRate) : "--";
+    const savingsTone = monthlySavings < 0 ? "red" : savingsRate >= 20 ? "green" : "orange";
     const reviewTransactions = [...state.transactions]
       .filter((transaction) => !transaction.reviewed || reviewSuggestionIds.has(transaction.id))
       .sort((a, b) => b.date.localeCompare(a.date))
@@ -1191,6 +1266,36 @@ export function FinanceApp() {
               </div>
             </div>
           </Panel>
+        </div>
+        <div className="grid gap-6 xl:grid-cols-2">
+          <Panel title="Savings snapshot" action="Goals" onAction={() => setUi({ view: "goals" })}>
+            <div className="flex min-h-[17.5rem] flex-col justify-between gap-5">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <p className="text-sm font-black text-blue-300">{formatMonthKey(budgetMonthKey)}</p>
+                  <p className={`mt-1 text-4xl font-black ${savingsTone === "red" ? "text-red-200" : savingsTone === "green" ? "text-[var(--green)]" : "text-[var(--orange)]"}`}>
+                    {savingsRateLabel}
+                  </p>
+                  <p className="mt-2 font-bold text-[var(--muted)]">{usdExact.format(monthlySavings)} saved this month</p>
+                </div>
+                <span className="grid h-12 w-12 shrink-0 place-items-center rounded-2xl border border-emerald-400/20 bg-emerald-400/10 text-emerald-100">
+                  <PiggyBank size={22} />
+                </span>
+              </div>
+              <div>
+                <Progress spent={Math.max(monthlySavings, 0)} budget={monthlyIncome} color="var(--green)" mode="solid" />
+                <div className="mt-4 grid gap-3 sm:grid-cols-3">
+                  <Metric label="Income" value={usdExact.format(monthlyIncome)} tone="green" />
+                  <Metric label="Spending" value={usdExact.format(spent)} tone={spent > monthlyIncome && monthlyIncome > 0 ? "red" : "orange"} />
+                  <Metric label="Saved" value={usdExact.format(monthlySavings)} tone={savingsTone} />
+                </div>
+              </div>
+            </div>
+          </Panel>
+          <Panel title="Top categories" action="View all" onAction={() => {
+            setSelectedCategoryId(null);
+            setUi({ view: "categories" });
+          }}>{renderTopCategories()}</Panel>
           <Panel title="Transactions to review" action="View all" onAction={() => setUi({ view: "transactions" })}>
             <DashboardReviewList
               transactions={reviewTransactions}
@@ -1204,15 +1309,9 @@ export function FinanceApp() {
               }, () => bulkPatchTransactions({ updates: reviewTransactions.map((transaction) => ({ id: transaction.id, reviewed: true })) }))}
             />
           </Panel>
-          <div className="space-y-6">
-            <Panel title="Top categories" action="View all" onAction={() => {
-              setSelectedCategoryId(null);
-              setUi({ view: "categories" });
-            }}>{renderTopCategories()}</Panel>
-            <Panel title="Next two weeks" action="Recurrings" onAction={() => setUi({ view: "recurrings" })}>
-              <div className="space-y-3">{state.recurrences.slice(0, 3).map(renderRecurrenceRow)}</div>
-            </Panel>
-          </div>
+          <Panel title="Next two weeks" action="Recurrings" onAction={() => setUi({ view: "recurrings" })}>
+            <div className="space-y-3">{state.recurrences.slice(0, 3).map(renderRecurrenceRow)}</div>
+          </Panel>
         </div>
       </div>
     );
@@ -1246,9 +1345,6 @@ export function FinanceApp() {
 
   function renderTransactionRegister(transactions: Transaction[], options: { emptyText?: string; showFirstMonthHeader?: boolean } = {}) {
     const groupedTransactions = groupTransactionsByMonth(transactions);
-    const visibleTransactionIds = transactions.map((transaction) => transaction.id);
-    const visibleTransactionIdSet = new Set(visibleTransactionIds);
-    const selectedVisibleTransactionIds = selectedTransactionIds.filter((id) => visibleTransactionIdSet.has(id));
 
     return (
       <>
@@ -1280,19 +1376,6 @@ export function FinanceApp() {
             {options.emptyText || "No transactions match this view."}
           </div>
         )}
-        {selectedVisibleTransactionIds.length ? (
-          <BulkTransactionBar
-            selectedCount={selectedVisibleTransactionIds.length}
-            categories={allSortedCategories}
-            openMenu={bulkMenu}
-            setOpenMenu={setBulkMenu}
-            onClear={clearTransactionSelection}
-            onSelectAll={() => setSelectedTransactionIds(visibleTransactionIds)}
-            onCategory={(categoryId) => assignSelectedCategory(categoryId, selectedVisibleTransactionIds)}
-            onType={(type) => assignSelectedType(type, selectedVisibleTransactionIds)}
-            onDelete={() => deleteSelectedTransactions(selectedVisibleTransactionIds)}
-          />
-        ) : null}
       </>
     );
   }
@@ -1360,25 +1443,19 @@ export function FinanceApp() {
     if (selectedCategory) return renderCategoryTransactions(selectedCategory);
 
     return (
-      <div className="fade-in space-y-3">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-2">
-            <ChevronDown size={16} className="text-blue-300" />
-            <h2 className="text-xl font-black">Regular categories</h2>
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <Button onClick={() => openGroupModal()}><Plus size={16} /> Group</Button>
-            <Button onClick={() => openCategoryModal()}><Plus size={16} /> Category</Button>
-          </div>
+      <div className="fade-in space-y-2">
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          <Button onClick={() => openGroupModal()}><Plus size={16} /> Group</Button>
+          <Button onClick={() => openCategoryModal()}><Plus size={16} /> Category</Button>
         </div>
-        <div className="hidden px-4 text-xs font-black uppercase text-blue-300/80 md:grid md:grid-cols-[minmax(220px,1.3fr)_90px_minmax(180px,1fr)_90px_92px] md:items-center">
+        <div className="hidden px-3 text-[11px] font-black uppercase text-blue-300/80 md:grid md:grid-cols-[minmax(220px,1.3fr)_90px_minmax(180px,1fr)_90px_92px] md:items-center">
           <div />
           <div className="text-right">Spent</div>
           <div />
           <div className="text-right">Budget</div>
           <div />
         </div>
-        <div className="space-y-3">{sortedBudgetGroups.map(renderBudgetGroup)}</div>
+        <div className="space-y-1">{sortedBudgetGroups.map(renderBudgetGroup)}</div>
       </div>
     );
   }
@@ -1437,13 +1514,7 @@ export function FinanceApp() {
           <input className="w-full bg-transparent py-3 outline-none" placeholder="Search merchants or notes" value={state.search} onChange={(event) => setState({ ...state, search: event.target.value })} />
         </label>
 
-        {renderTransactionRegister(
-          monthTransactions.filter((transaction) => {
-            const search = state.search.toLowerCase();
-            return !search || `${transaction.name} ${transaction.merchant} ${transaction.note}`.toLowerCase().includes(search);
-          }),
-          { emptyText: "No transactions in this category for this month.", showFirstMonthHeader: false }
-        )}
+        {renderTransactionRegister(selectedCategoryRegisterTransactions, { emptyText: "No transactions in this category for this month.", showFirstMonthHeader: false })}
       </div>
     );
   }
@@ -1453,8 +1524,8 @@ export function FinanceApp() {
     const groupCategories = categoriesByGroup.get(group.id) || [];
     const groupRecurring = groupRecurringAmountFromMap(state.categories, recurringByCategory, group.id);
     return (
-      <section key={group.id} className="space-y-1">
-        <div className="grid gap-3 rounded-lg px-4 py-2 md:grid-cols-[minmax(220px,1.3fr)_90px_minmax(180px,1fr)_90px_92px] md:items-center">
+      <section key={group.id} className="space-y-0.5">
+        <div className="grid gap-2 rounded-lg px-3 py-1.5 text-sm md:grid-cols-[minmax(220px,1.3fr)_90px_minmax(180px,1fr)_90px_92px] md:items-center">
           <button className="flex items-center gap-2 text-left font-black" onClick={() => commit((draft) => {
             const target = draft.groups.find((item) => item.id === group.id);
             if (target) target.expanded = !target.expanded;
@@ -1469,7 +1540,7 @@ export function FinanceApp() {
           <div />
         </div>
         {group.expanded ? (
-          <div className="ml-6 space-y-1 border-l pl-3" style={{ borderColor: group.color }}>
+          <div className="ml-4 space-y-0.5 border-l pl-2" style={{ borderColor: group.color }}>
             {groupCategories.map((category) => {
               const spent = categorySpentFromMap(spendByCategory, category.id);
               const recurring = recurringAmountFromMap(recurringByCategory, category.id);
@@ -1478,7 +1549,7 @@ export function FinanceApp() {
                   key={category.id}
                   role="button"
                   tabIndex={0}
-                  className="group/category grid cursor-pointer gap-3 rounded-lg px-3 py-2 transition hover:bg-[var(--selected-soft)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-400 md:grid-cols-[minmax(190px,1.3fr)_90px_minmax(180px,1fr)_90px_92px] md:items-center"
+                  className="group/category grid cursor-pointer gap-2 rounded-md px-2 py-1 text-sm transition hover:bg-[var(--selected-soft)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-400 md:grid-cols-[minmax(190px,1.3fr)_90px_minmax(180px,1fr)_90px_92px] md:items-center"
                   onClick={() => openCategoryTransactions(category)}
                   onKeyDown={(event) => {
                     if (event.key === "Enter" || event.key === " ") {
@@ -1487,8 +1558,8 @@ export function FinanceApp() {
                     }
                   }}
                 >
-                  <div className="flex min-w-0 items-center gap-3">
-                    <span className="grid h-7 w-7 shrink-0 place-items-center rounded-md bg-[var(--surface-2)]">{category.icon}</span>
+                  <div className="flex min-w-0 items-center gap-2">
+                    <span className="grid h-6 w-6 shrink-0 place-items-center rounded-md bg-[var(--surface-2)] text-sm">{category.icon}</span>
                     <span className="truncate font-bold">{category.name}</span>
                   </div>
                   <div className="text-right font-black">{usd.format(spent)}</div>
@@ -1822,7 +1893,7 @@ function SpendingDashboardChart({
   const lastPoint = actualPoints.at(-1) ?? { x: 4, y: valueY(0, maxChartValue), value: 0, paceValue: 0 };
   const over = spent > budget;
   const label = over ? `${usdExact.format(spent - budget)} over` : `${usd.format(budget - spent)} left`;
-  const badgeColor = budgetHealthColor(lastPoint.value, lastPoint.paceValue);
+  const badgeColor = budgetHealthColor(lastPoint.value, lastPoint.paceValue, budget);
 
   return (
     <div className={`relative ${className ?? "h-44 w-full"}`}>
@@ -1838,7 +1909,7 @@ function SpendingDashboardChart({
               y1={previous.y}
               x2={point.x}
               y2={point.y}
-              stroke={budgetHealthColor(point.value, point.paceValue)}
+              stroke={budgetHealthColor(point.value, point.paceValue, budget)}
               strokeWidth="3"
               strokeLinecap="round"
               vectorEffect="non-scaling-stroke"
@@ -1865,16 +1936,28 @@ function valueY(value: number, maxValue: number) {
   return 86 - (value / maxValue) * 62;
 }
 
-function budgetHealthColor(actual: number, pace: number) {
-  if (pace <= 0 && actual > 0) return "var(--red)";
-  if (pace <= 0) return "var(--green)";
+const HEALTH_PALETTE = {
+  green: "#18d978",
+  lime: "#86d85d",
+  yellow: "#f2ca52",
+  orange: "#f49643",
+  red: "#ef5a50"
+};
 
-  const paceRatio = actual / pace;
-  if (paceRatio >= 1) return "var(--red)";
-  if (paceRatio >= 0.92) return "#f97316";
-  if (paceRatio >= 0.8) return "#fbbf24";
-  if (paceRatio >= 0.65) return "#84cc16";
-  return "var(--green)";
+const HEALTH_STOPS = [
+  { ratio: 0, color: HEALTH_PALETTE.green },
+  { ratio: 0.58, color: HEALTH_PALETTE.green },
+  { ratio: 0.74, color: HEALTH_PALETTE.lime },
+  { ratio: 0.88, color: HEALTH_PALETTE.yellow },
+  { ratio: 1, color: HEALTH_PALETTE.orange }
+];
+
+function budgetHealthColor(actual: number, pace: number, budget = 0) {
+  if (budget > 0 && actual > budget) return HEALTH_PALETTE.red;
+  if (pace <= 0 && actual > 0) return HEALTH_PALETTE.orange;
+  if (pace <= 0) return HEALTH_PALETTE.green;
+
+  return blendedHealthColor(actual / pace);
 }
 
 function NetWorthDashboardChart({ className, range }: { className?: string; range: TimeRange }) {
@@ -2041,15 +2124,39 @@ function pointPair(point: { x: number; y: number }) {
 }
 
 function progressHealthColor(spent: number, budget: number) {
-  if (budget <= 0 && spent > 0) return "var(--red)";
-  if (budget <= 0) return "var(--green)";
+  if (budget <= 0 && spent > 0) return HEALTH_PALETTE.red;
+  if (budget <= 0) return HEALTH_PALETTE.green;
 
   const ratio = spent / budget;
-  if (ratio >= 1) return "var(--red)";
-  if (ratio >= 0.92) return "#f97316";
-  if (ratio >= 0.8) return "#fbbf24";
-  if (ratio >= 0.65) return "#84cc16";
-  return "var(--green)";
+  if (ratio > 1) return HEALTH_PALETTE.red;
+  return blendedHealthColor(ratio);
+}
+
+function blendedHealthColor(ratio: number) {
+  const normalizedRatio = Math.max(0, Math.min(1, ratio));
+
+  for (let index = 1; index < HEALTH_STOPS.length; index += 1) {
+    const previous = HEALTH_STOPS[index - 1];
+    const current = HEALTH_STOPS[index];
+    if (normalizedRatio <= current.ratio) {
+      const span = current.ratio - previous.ratio || 1;
+      return mixHexColor(previous.color, current.color, (normalizedRatio - previous.ratio) / span);
+    }
+  }
+
+  return HEALTH_PALETTE.orange;
+}
+
+function mixHexColor(from: string, to: string, amount: number) {
+  const start = hexToRgb(from);
+  const end = hexToRgb(to);
+  const mix = start.map((channel, index) => Math.round(channel + (end[index] - channel) * amount));
+  return `rgb(${mix[0]}, ${mix[1]}, ${mix[2]})`;
+}
+
+function hexToRgb(hex: string) {
+  const value = hex.replace("#", "");
+  return [0, 2, 4].map((offset) => Number.parseInt(value.slice(offset, offset + 2), 16));
 }
 
 function Progress({
@@ -2191,6 +2298,8 @@ function BulkTransactionBar({
   onSelectAll,
   onCategory,
   onType,
+  onExclude,
+  onReview,
   onDelete
 }: {
   selectedCount: number;
@@ -2201,6 +2310,8 @@ function BulkTransactionBar({
   onSelectAll: () => void;
   onCategory: (categoryId: string | null) => void;
   onType: (type: "transaction" | "transfer") => void;
+  onExclude: () => void;
+  onReview: () => void;
   onDelete: () => void;
 }) {
   return (
@@ -2257,6 +2368,12 @@ function BulkTransactionBar({
               </button>
               <button type="button" className="w-full rounded-xl px-3 py-2 text-left text-sm font-black hover:bg-[var(--surface-2)]" onClick={onClear}>
                 Unselect all
+              </button>
+              <button type="button" className="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left text-sm font-black text-emerald-200 hover:bg-emerald-500/10" onClick={onReview}>
+                <Check size={15} /> Mark reviewed
+              </button>
+              <button type="button" className="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left text-sm font-black text-amber-200 hover:bg-amber-500/10" onClick={onExclude}>
+                <X size={15} /> Exclude from spending
               </button>
               <button type="button" className="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left text-sm font-black text-red-300 hover:bg-red-500/10" onClick={onDelete}>
                 <Trash2 size={15} /> Delete
