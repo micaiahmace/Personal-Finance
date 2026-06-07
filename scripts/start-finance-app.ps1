@@ -35,23 +35,16 @@ function Test-AppHealthy {
   }
 }
 
-function Stop-StaleFinanceDevProcesses {
-  $escapedProjectRoot = [regex]::Escape($ProjectRoot)
+function Stop-Port3000Listeners {
+  $portOwners = Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue |
+    Select-Object -ExpandProperty OwningProcess -Unique |
+    Where-Object { $_ -and $_ -ne $PID }
 
-  Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-    Where-Object {
-      $_.Name -in @("node.exe", "cmd.exe", "powershell.exe") -and
-      $_.CommandLine -and
-      (
-        ($_.CommandLine -match "scripts[/\\]dev\.mjs" -and $_.CommandLine -match $escapedProjectRoot) -or
-        ($_.CommandLine -match "next.*dev" -and $_.CommandLine -match $escapedProjectRoot)
-      )
-    } |
-    ForEach-Object {
-      try {
-        Invoke-CimMethod -InputObject $_ -MethodName Terminate | Out-Null
-      } catch {}
-    }
+  foreach ($owner in $portOwners) {
+    try {
+      Stop-Process -Id $owner -Force -ErrorAction Stop
+    } catch {}
+  }
 }
 
 function Open-AppInChrome {
@@ -93,48 +86,47 @@ if (-not (Test-Path $NextBin)) {
   exit 1
 }
 
-if (-not (Test-AppHealthy)) {
-  Stop-StaleFinanceDevProcesses
-  Start-Sleep -Seconds 2
+Write-Host "Restarting Personal Finance app..." -ForegroundColor Cyan
+Stop-Port3000Listeners
+Start-Sleep -Seconds 2
 
-  $portOwner = Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue |
-    Select-Object -ExpandProperty OwningProcess -Unique
+$portOwner = Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue |
+  Select-Object -ExpandProperty OwningProcess -Unique
 
-  if ($portOwner) {
-    Show-StartupError "Port 3000 is already being used by another process. Close that app or stop the old server, then launch Personal Finance again."
-    exit 1
-  } else {
-    $devCommand = @"
+if ($portOwner) {
+  Show-StartupError "Port 3000 is still being used by another process. Close that app or stop the old server, then launch Personal Finance again."
+  exit 1
+}
+
+$devCommand = @"
 Set-Location '$ProjectRoot'
 `$env:Path = '$NodeDir;' + `$env:Path
-& '$NpmPath' run dev
+& '$NpmPath' run dev:clean
 "@
 
-    Start-Process -FilePath "powershell.exe" -ArgumentList @(
-      "-NoExit",
-      "-ExecutionPolicy",
-      "Bypass",
-      "-Command",
-      $devCommand
-    ) -WorkingDirectory $ProjectRoot
+Start-Process -FilePath "powershell.exe" -ArgumentList @(
+  "-NoExit",
+  "-ExecutionPolicy",
+  "Bypass",
+  "-Command",
+  $devCommand
+) -WorkingDirectory $ProjectRoot
 
-    Write-Host "Starting Personal Finance app..." -ForegroundColor Cyan
+Write-Host "Starting Personal Finance app..." -ForegroundColor Cyan
 
-    $ready = $false
-    for ($attempt = 1; $attempt -le 45; $attempt += 1) {
-      Start-Sleep -Seconds 1
+$ready = $false
+for ($attempt = 1; $attempt -le 45; $attempt += 1) {
+  Start-Sleep -Seconds 1
 
-      if (Test-AppHealthy) {
-        $ready = $true
-        break
-      }
-    }
-
-    if (-not $ready) {
-      Show-StartupError "The app did not become ready within 45 seconds. Check the dev-server PowerShell window for details."
-      exit 1
-    }
+  if (Test-AppHealthy) {
+    $ready = $true
+    break
   }
+}
+
+if (-not $ready) {
+  Show-StartupError "The app did not become ready within 45 seconds. Check the dev-server PowerShell window for details."
+  exit 1
 }
 
 Open-AppInChrome
