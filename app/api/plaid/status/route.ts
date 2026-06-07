@@ -4,7 +4,7 @@ import { prisma } from "@/lib/prisma";
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  const [items, accountCount, transactionCount, latestTransaction] = await Promise.all([
+  const [items, accountCount, transactionCount, holdingCount, latestTransaction] = await Promise.all([
     prisma.plaidItem.findMany({
       select: {
         itemId: true,
@@ -17,6 +17,7 @@ export async function GET() {
     }),
     prisma.account.count({ where: { plaidAccountId: { not: null } } }),
     prisma.transaction.count({ where: { plaidTransactionId: { not: null } } }),
+    prisma.investmentHolding.count(),
     prisma.transaction.findFirst({
       where: { plaidTransactionId: { not: null } },
       select: { date: true },
@@ -30,6 +31,7 @@ export async function GET() {
     connectedItemCount: items.length,
     accountCount,
     transactionCount,
+    holdingCount,
     latestTransactionDate: latestTransaction?.date.toISOString().slice(0, 10) || null,
     items: items.map((item) => ({
       itemId: item.itemId,

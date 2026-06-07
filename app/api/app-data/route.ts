@@ -26,10 +26,14 @@ async function ensureSeeded() {
 }
 
 async function readFinanceState(): Promise<FinanceState> {
-  const [groups, categories, accounts, transactions, recurrences, goals, rules] = await Promise.all([
+  const [groups, categories, accounts, investmentHoldings, transactions, recurrences, goals, rules] = await Promise.all([
     prisma.budgetGroup.findMany({ orderBy: { order: "asc" } }),
     prisma.budgetCategory.findMany({ orderBy: [{ groupId: "asc" }, { order: "asc" }] }),
     prisma.account.findMany({ orderBy: { name: "asc" } }),
+    prisma.investmentHolding.findMany({
+      include: { security: true },
+      orderBy: { marketValue: "desc" }
+    }),
     prisma.transaction.findMany({ orderBy: { date: "desc" }, include: { splits: true } }),
     prisma.recurringCharge.findMany({ orderBy: { nextDate: "asc" } }),
     prisma.savingsGoal.findMany({ orderBy: { createdAt: "asc" } }),
@@ -64,6 +68,19 @@ async function readFinanceState(): Promise<FinanceState> {
       balance: account.currentBalance,
       available: account.availableBalance ?? account.currentBalance,
       change: 0
+    })),
+    investmentHoldings: investmentHoldings.map((holding) => ({
+      id: holding.id,
+      accountId: holding.accountId,
+      securityId: holding.securityId,
+      name: holding.security.name,
+      ticker: holding.security.tickerSymbol || "",
+      type: holding.security.type || "",
+      quantity: holding.quantity,
+      value: holding.marketValue,
+      costBasis: holding.costBasis,
+      price: holding.institutionPrice ?? holding.security.closePrice,
+      currency: holding.isoCurrencyCode || holding.security.isoCurrencyCode || "USD"
     })),
     transactions: transactions.map((transaction) => ({
       id: transaction.id,
@@ -115,14 +132,22 @@ async function readFinanceState(): Promise<FinanceState> {
 async function writeFinanceState(state: FinanceState) {
   const writableState = withIncomeDefaults(state);
   await prisma.$transaction(async (tx) => {
-    const existingAccounts = new Map((await tx.account.findMany()).map((account) => [account.id, account]));
-    const existingTransactions = new Map((await tx.transaction.findMany()).map((transaction) => [transaction.id, transaction]));
+    const [accounts, transactions, investmentSecurities, investmentHoldings] = await Promise.all([
+      tx.account.findMany(),
+      tx.transaction.findMany(),
+      tx.investmentSecurity.findMany(),
+      tx.investmentHolding.findMany()
+    ]);
+    const existingAccounts = new Map(accounts.map((account) => [account.id, account]));
+    const existingTransactions = new Map(transactions.map((transaction) => [transaction.id, transaction]));
 
     await tx.transactionSplit.deleteMany();
     await tx.transaction.deleteMany();
     await tx.merchantRule.deleteMany();
     await tx.recurringCharge.deleteMany();
     await tx.savingsGoal.deleteMany();
+    await tx.investmentHolding.deleteMany();
+    await tx.investmentSecurity.deleteMany();
     await tx.budgetCategory.deleteMany();
     await tx.budgetGroup.deleteMany();
     await tx.account.deleteMany();
@@ -152,6 +177,41 @@ async function writeFinanceState(state: FinanceState) {
         isoCurrencyCode: existingAccounts.get(account.id)?.isoCurrencyCode || "USD"
       }))
     });
+
+    if (investmentSecurities.length > 0) {
+      await tx.investmentSecurity.createMany({
+        data: investmentSecurities.map((security) => ({
+          id: security.id,
+          plaidSecurityId: security.plaidSecurityId,
+          name: security.name,
+          tickerSymbol: security.tickerSymbol,
+          type: security.type,
+          closePrice: security.closePrice,
+          closePriceAsOf: security.closePriceAsOf,
+          isoCurrencyCode: security.isoCurrencyCode
+        }))
+      });
+    }
+
+    const nextAccountIds = new Set(writableState.accounts.map((account) => account.id));
+    const preservedSecurityIds = new Set(investmentSecurities.map((security) => security.id));
+    const preservedHoldings = investmentHoldings.filter((holding) => nextAccountIds.has(holding.accountId) && preservedSecurityIds.has(holding.securityId));
+    if (preservedHoldings.length > 0) {
+      await tx.investmentHolding.createMany({
+        data: preservedHoldings.map((holding) => ({
+          id: holding.id,
+          accountId: holding.accountId,
+          securityId: holding.securityId,
+          plaidItemId: holding.plaidItemId,
+          quantity: holding.quantity,
+          marketValue: holding.marketValue,
+          costBasis: holding.costBasis,
+          institutionPrice: holding.institutionPrice,
+          institutionPriceAsOf: holding.institutionPriceAsOf,
+          isoCurrencyCode: holding.isoCurrencyCode
+        }))
+      });
+    }
 
     await tx.budgetCategory.createMany({
       data: writableState.categories.map((category) => ({
@@ -272,6 +332,7 @@ async function ensureIncomeCategory() {
   await prisma.transaction.updateMany({
     where: {
       amount: { gt: 0 },
+      account: { is: { type: { not: "Investment" } } },
       internalTransfer: false,
       excluded: false,
       categoryId: null
@@ -284,6 +345,7 @@ async function ensureIncomeCategory() {
 }
 
 function withIncomeDefaults(state: FinanceState): FinanceState {
+  const investmentAccountIds = new Set(state.accounts.filter((account) => account.group === "Investment").map((account) => account.id));
   const groups = state.groups.some((group) => group.id === INCOME_GROUP_ID)
     ? state.groups
     : [...state.groups, { id: INCOME_GROUP_ID, name: "Income", color: "#16dc72", order: 99, expanded: false }];
@@ -291,6 +353,9 @@ function withIncomeDefaults(state: FinanceState): FinanceState {
     ? state.categories
     : [...state.categories, { id: INCOME_CATEGORY_ID, groupId: INCOME_GROUP_ID, name: "Income", icon: "$", budget: 0, order: 1 }];
   const transactions = state.transactions.map((transaction) => {
+    if (investmentAccountIds.has(transaction.accountId)) {
+      return { ...transaction, categoryId: null, internal: true, excluded: true, reviewed: true };
+    }
     if (transaction.internal) {
       return { ...transaction, categoryId: null, excluded: true, reviewed: true };
     }

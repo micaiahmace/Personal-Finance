@@ -42,6 +42,20 @@ export type Account = {
   change: number;
 };
 
+export type InvestmentHolding = {
+  id: string;
+  accountId: string;
+  securityId: string;
+  name: string;
+  ticker: string;
+  type: string;
+  quantity: number;
+  value: number;
+  costBasis: number | null;
+  price: number | null;
+  currency: string;
+};
+
 export type Split = {
   categoryId: string;
   amount: number;
@@ -116,6 +130,7 @@ export type FinanceState = {
   groups: BudgetGroup[];
   categories: BudgetCategory[];
   accounts: Account[];
+  investmentHoldings: InvestmentHolding[];
   transactions: Transaction[];
   recurrences: Recurrence[];
   goals: Goal[];

@@ -24,6 +24,7 @@ model Account {
   updatedAt          DateTime      @updatedAt
   transactions       Transaction[]
   goals              SavingsGoal[]
+  holdings           InvestmentHolding[]
 
   @@index([plaidItemId])
   @@index([type])
@@ -144,6 +145,41 @@ model SavingsGoal {
 
   @@index([accountId])
   @@index([status])
+}
+
+model InvestmentSecurity {
+  id              String              @id
+  plaidSecurityId String?             @unique
+  name            String
+  tickerSymbol    String?
+  type            String?
+  closePrice      Float?
+  closePriceAsOf  DateTime?
+  isoCurrencyCode String?
+  holdings        InvestmentHolding[]
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+}
+
+model InvestmentHolding {
+  id                   String             @id @default(cuid())
+  accountId            String
+  securityId           String
+  plaidItemId          String?
+  quantity             Float
+  marketValue          Float
+  costBasis            Float?
+  institutionPrice     Float?
+  institutionPriceAsOf DateTime?
+  isoCurrencyCode      String?
+  account              Account            @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  security             InvestmentSecurity @relation(fields: [securityId], references: [id], onDelete: Cascade)
+  updatedAt            DateTime           @updatedAt
+
+  @@unique([accountId, securityId])
+  @@index([accountId])
+  @@index([securityId])
+  @@index([plaidItemId])
 }
 
 model PlaidItem {

@@ -35,6 +35,27 @@ type PlaidTransactionShape = {
   transaction_id: string;
 };
 
+type PlaidHoldingShape = {
+  account_id: string;
+  cost_basis?: number | null;
+  institution_price?: number | null;
+  institution_price_as_of?: string | null;
+  institution_value?: number | null;
+  iso_currency_code?: string | null;
+  quantity: number;
+  security_id: string;
+};
+
+type PlaidSecurityShape = {
+  close_price?: number | null;
+  close_price_as_of?: string | null;
+  iso_currency_code?: string | null;
+  name?: string | null;
+  security_id: string;
+  ticker_symbol?: string | null;
+  type?: string | null;
+};
+
 type LocalAccountShape = {
   id: string;
   plaidAccountId?: string | null;
@@ -80,6 +101,8 @@ async function syncOnePlaidItem(item: { id: string; itemId: string; accessToken:
       await upsertPlaidAccount(tx, item.itemId, account);
     }
   });
+
+  const holdingsSync = await syncInvestmentHoldings(item.itemId, accessToken);
 
   let cursor = item.cursor || undefined;
   let hasMore = true;
@@ -130,16 +153,19 @@ async function syncOnePlaidItem(item: { id: string; itemId: string; accessToken:
     hasMore = response.data.has_more;
   }
 
-  if (addedCount > 0 || modifiedCount > 0 || removedCount > 0) {
-    await prisma.$transaction(async (tx) => {
+  const protectedInvestmentTransactions = await prisma.$transaction(async (tx) => {
+    if (addedCount > 0 || modifiedCount > 0 || removedCount > 0) {
       await detectInternalTransfers(tx);
       await inferRecurringCharges(tx);
-    });
-  }
+    }
+    return protectInvestmentTransactions(tx);
+  });
 
   return {
     itemId: item.itemId,
     accounts: accounts.length,
+    holdings: holdingsSync,
+    protectedInvestmentTransactions,
     added: addedCount,
     modified: modifiedCount,
     removed: removedCount
@@ -220,6 +246,98 @@ async function upsertPlaidAccount(tx: Prisma.TransactionClient, itemId: string, 
   });
 }
 
+async function syncInvestmentHoldings(itemId: string, accessToken: string) {
+  const plaid = getPlaidClient();
+
+  try {
+    const response = await plaid.investmentsHoldingsGet({ access_token: accessToken });
+    const holdings = response.data.holdings as PlaidHoldingShape[];
+    const securities = response.data.securities as PlaidSecurityShape[];
+
+    await prisma.$transaction(async (tx) => {
+      const investmentAccounts = await tx.account.findMany({
+        where: {
+          plaidItemId: itemId,
+          type: "Investment",
+          plaidAccountId: { not: null }
+        },
+        select: { id: true, plaidAccountId: true }
+      });
+      const accountsByPlaidId = new Map(investmentAccounts.map((account) => [account.plaidAccountId, account.id]));
+      const securitiesByPlaidId = new Map(securities.map((security) => [security.security_id, security]));
+
+      await tx.investmentHolding.deleteMany({ where: { plaidItemId: itemId } });
+
+      for (const security of securities) {
+        await upsertInvestmentSecurity(tx, security);
+      }
+
+      const rows = holdings.flatMap((holding) => {
+        const accountId = accountsByPlaidId.get(holding.account_id);
+        if (!accountId) return [];
+
+        const security = securitiesByPlaidId.get(holding.security_id);
+        if (!security) return [];
+
+        return [{
+          accountId,
+          securityId: localSecurityId(holding.security_id),
+          plaidItemId: itemId,
+          quantity: holding.quantity,
+          marketValue: holding.institution_value ?? Number(((holding.institution_price ?? 0) * holding.quantity).toFixed(2)),
+          costBasis: holding.cost_basis ?? null,
+          institutionPrice: holding.institution_price ?? null,
+          institutionPriceAsOf: parseOptionalPlaidDate(holding.institution_price_as_of),
+          isoCurrencyCode: holding.iso_currency_code || security.iso_currency_code || "USD"
+        }];
+      });
+
+      if (rows.length > 0) {
+        await tx.investmentHolding.createMany({ data: rows });
+      }
+    });
+
+    return {
+      synced: true,
+      holdingCount: holdings.length,
+      securityCount: securities.length
+    };
+  } catch (error) {
+    return {
+      synced: false,
+      skipped: true,
+      reason: plaidErrorSummary(error)
+    };
+  }
+}
+
+async function upsertInvestmentSecurity(tx: Prisma.TransactionClient, security: PlaidSecurityShape) {
+  const name = security.name || security.ticker_symbol || "Unknown security";
+
+  await tx.investmentSecurity.upsert({
+    where: { id: localSecurityId(security.security_id) },
+    create: {
+      id: localSecurityId(security.security_id),
+      plaidSecurityId: security.security_id,
+      name,
+      tickerSymbol: security.ticker_symbol || null,
+      type: security.type || null,
+      closePrice: security.close_price ?? null,
+      closePriceAsOf: parseOptionalPlaidDate(security.close_price_as_of),
+      isoCurrencyCode: security.iso_currency_code || "USD"
+    },
+    update: {
+      plaidSecurityId: security.security_id,
+      name,
+      tickerSymbol: security.ticker_symbol || null,
+      type: security.type || null,
+      closePrice: security.close_price ?? null,
+      closePriceAsOf: parseOptionalPlaidDate(security.close_price_as_of),
+      isoCurrencyCode: security.iso_currency_code || "USD"
+    }
+  });
+}
+
 async function upsertPlaidTransaction(tx: Prisma.TransactionClient, transaction: PlaidTransactionShape, lookups: SyncLookups) {
   const localAccount = lookups.accountsByPlaidId.get(transaction.account_id);
   if (!localAccount) return;
@@ -228,17 +346,20 @@ async function upsertPlaidTransaction(tx: Prisma.TransactionClient, transaction:
   const existing = lookups.existingByPlaidId.get(transaction.transaction_id);
   const matchingRule = ruleForMerchant(lookups.rules, merchant);
   const ruleInternalTransfer = Boolean(matchingRule?.internalTransfer);
+  const investmentActivity = localAccount.type === "Investment";
   const normalizedAmount = normalizePlaidAmount(transaction.amount);
-  const importedCategoryId = ruleInternalTransfer ? null : matchingRule?.categoryId || categoryForPlaidTransaction(lookups, transaction, merchant, normalizedAmount);
-  const categoryId = existing?.categoryId || importedCategoryId;
-  const likelyTransfer = ruleInternalTransfer || isTransferLike(merchant) || isTransferLike(transaction.name);
-  const keepManualFlags = Boolean(existing?.reviewed || existing?.splits.length || existing?.excluded || existing?.internalTransfer || existing?.note);
-  const nextCategoryId = keepManualFlags ? existing?.categoryId ?? null : categoryId;
-  const nextReviewed = keepManualFlags ? existing?.reviewed ?? false : Boolean(categoryId || likelyTransfer);
-  const nextExcluded = keepManualFlags ? existing?.excluded ?? false : ruleInternalTransfer;
-  const nextInternalTransfer = keepManualFlags ? existing?.internalTransfer ?? false : ruleInternalTransfer;
+  const importedCategoryId = investmentActivity || ruleInternalTransfer ? null : matchingRule?.categoryId || categoryForPlaidTransaction(lookups, transaction, merchant, normalizedAmount);
+  const categoryId = investmentActivity ? null : existing?.categoryId || importedCategoryId;
+  const likelyTransfer = investmentActivity || ruleInternalTransfer || isTransferLike(merchant) || isTransferLike(transaction.name);
+  const keepManualFlags = !investmentActivity && Boolean(existing?.reviewed || existing?.splits.length || existing?.excluded || existing?.internalTransfer || existing?.note);
+  const nextCategoryId = investmentActivity ? null : keepManualFlags ? existing?.categoryId ?? null : categoryId;
+  const nextReviewed = investmentActivity ? true : keepManualFlags ? existing?.reviewed ?? false : Boolean(categoryId || likelyTransfer);
+  const nextExcluded = investmentActivity ? true : keepManualFlags ? existing?.excluded ?? false : ruleInternalTransfer;
+  const nextInternalTransfer = investmentActivity ? true : keepManualFlags ? existing?.internalTransfer ?? false : ruleInternalTransfer;
   const nextNote =
-    keepManualFlags
+    investmentActivity
+      ? "Investment account activity is excluded from spending."
+      : keepManualFlags
       ? existing?.note ?? null
       : ruleInternalTransfer
         ? "Marked internal transfer by merchant rule."
@@ -252,17 +373,17 @@ async function upsertPlaidTransaction(tx: Prisma.TransactionClient, transaction:
       id: localTransactionId(transaction.transaction_id),
       plaidTransactionId: transaction.transaction_id,
       accountId: localAccount.id,
-      categoryId,
+      categoryId: nextCategoryId,
       date: parsePlaidDate(transaction.date),
       name: transaction.name,
       merchantName: merchant,
       amount: normalizedAmount,
       isoCurrencyCode: transaction.iso_currency_code || "USD",
-      reviewed: Boolean(categoryId || likelyTransfer),
+      reviewed: nextReviewed,
       pending: Boolean(transaction.pending),
-      excluded: ruleInternalTransfer,
-      internalTransfer: ruleInternalTransfer,
-      note: ruleInternalTransfer ? "Marked internal transfer by merchant rule." : likelyTransfer && !categoryId ? "Transfer-like Plaid transaction. Pair detection will exclude matched internal transfers." : null
+      excluded: nextExcluded,
+      internalTransfer: nextInternalTransfer,
+      note: nextNote
     },
     update: {
       accountId: localAccount.id,
@@ -375,6 +496,10 @@ function localTransactionId(plaidTransactionId: string) {
   return `plaid-transaction-${plaidTransactionId}`;
 }
 
+function localSecurityId(plaidSecurityId: string) {
+  return `plaid-security-${plaidSecurityId}`;
+}
+
 function accountGroup(type: string, subtype?: string | null) {
   const normalizedSubtype = subtype?.toLowerCase() || "";
   if (type === "credit") return "Credit card";
@@ -389,6 +514,40 @@ function normalizePlaidAmount(amount: number) {
 
 function parsePlaidDate(value: string) {
   return new Date(`${value.slice(0, 10)}T00:00:00`);
+}
+
+function parseOptionalPlaidDate(value?: string | null) {
+  return value ? parsePlaidDate(value) : null;
+}
+
+function plaidErrorSummary(error: unknown) {
+  const plaidError = error as { response?: { data?: { error_code?: string; error_message?: string } } };
+  const code = plaidError.response?.data?.error_code;
+  const message = plaidError.response?.data?.error_message || (error instanceof Error ? error.message : "Investment holdings are not available for this item.");
+  return code ? `${code}: ${message}` : message;
+}
+
+async function protectInvestmentTransactions(tx: Prisma.TransactionClient) {
+  const result = await tx.transaction.updateMany({
+    where: {
+      account: { is: { type: "Investment" } },
+      OR: [
+        { categoryId: { not: null } },
+        { reviewed: false },
+        { excluded: false },
+        { internalTransfer: false }
+      ]
+    },
+    data: {
+      categoryId: null,
+      reviewed: true,
+      excluded: true,
+      internalTransfer: true,
+      note: "Investment account activity is excluded from spending."
+    }
+  });
+
+  return result.count;
 }
 
 async function detectInternalTransfers(tx: Prisma.TransactionClient) {

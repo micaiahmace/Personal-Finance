@@ -15,7 +15,8 @@ export async function POST(request: NextRequest) {
     });
   }
 
-  if (webhookType !== "TRANSACTIONS") {
+  const syncableWebhookTypes = new Set(["TRANSACTIONS", "HOLDINGS", "INVESTMENTS_TRANSACTIONS"]);
+  if (!syncableWebhookTypes.has(webhookType)) {
     return NextResponse.json({
       ok: true,
       ignored: true,

@@ -33,7 +33,7 @@ import {
 import { type CSSProperties, type FormEvent, useEffect, useMemo, useState } from "react";
 import { INCOME_CATEGORY_ID, categorySpendMap, categorySpentFromMap, expenseEntries, goalCurrent, groupTotalsFromMap, incomeTotal, isBudgetCategory, isBudgetGroup, monthsUntil, netWorth, percent, projectedDate, ruleMatches, totalBudget, totalSpent, usd, usdExact } from "@/lib/finance";
 import { seedState } from "@/lib/seed-data";
-import type { Account, AccountGroup, AiSuggestion, BudgetCategory, BudgetGroup, FinanceState, Goal, MerchantRule, Recurrence, Transaction, View } from "@/lib/types";
+import type { Account, AccountGroup, AiSuggestion, BudgetCategory, BudgetGroup, FinanceState, Goal, InvestmentHolding, MerchantRule, Recurrence, Transaction, View } from "@/lib/types";
 
 const UI_PREFS_KEY = "personal-finance-ui-v1";
 const accountGroups: AccountGroup[] = ["Credit card", "Depository", "Investment", "Other"];
@@ -44,6 +44,9 @@ type SeriesKind = "netPrimary" | "netSecondary" | "investment";
 const timeRanges: TimeRange[] = ["1W", "1M", "3M", "YTD", "1Y", "ALL"];
 const percentFormatter = new Intl.NumberFormat("en-US", {
   maximumFractionDigits: 1
+});
+const quantityFormatter = new Intl.NumberFormat("en-US", {
+  maximumFractionDigits: 4
 });
 
 const nav = [
@@ -114,6 +117,7 @@ type PlaidStatus = {
   connectedItemCount: number;
   accountCount: number;
   transactionCount: number;
+  holdingCount: number;
   latestTransactionDate: string | null;
   items: Array<{
     itemId: string;
@@ -121,6 +125,12 @@ type PlaidStatus = {
     cursorReady: boolean;
     updatedAt: string;
   }>;
+};
+type BackupItem = {
+  fileName: string;
+  createdAt: string;
+  modifiedAt: string;
+  size: number;
 };
 type PersistHandler = (nextState: FinanceState, currentState: FinanceState) => void | Promise<void>;
 type TransactionPatch = Partial<Pick<Transaction, "categoryId" | "reviewed" | "excluded" | "internal" | "note" | "splits">>;
@@ -535,7 +545,6 @@ export function FinanceApp() {
   const [aiStatus, setAiStatus] = useState<AiStatus>({ ok: false, label: "AI checking" });
   const [plaidStatus, setPlaidStatus] = useState<PlaidStatus | null>(null);
   const [netWorthRange, setNetWorthRange] = useState<TimeRange>("1W");
-  const [investmentRange, setInvestmentRange] = useState<TimeRange>("1W");
 
   const categoriesById = useMemo(() => new Map(state.categories.map((category) => [category.id, category])), [state.categories]);
   const selectedCategory = selectedCategoryId ? categoriesById.get(selectedCategoryId) : undefined;
@@ -1767,27 +1776,81 @@ export function FinanceApp() {
   function renderInvestments() {
     const investments = state.accounts.filter((account) => account.group === "Investment");
     const total = investments.reduce((sum, account) => sum + account.balance, 0);
+    const holdings = [...state.investmentHoldings].sort((a, b) => b.value - a.value);
+    const holdingsTotal = holdings.reduce((sum, holding) => sum + holding.value, 0);
+    const accountsWithHoldings = new Set(holdings.map((holding) => holding.accountId)).size;
     return (
       <div className="fade-in space-y-6">
-        <Panel title="Live balance estimate" action="Settings">
-          <div className="flex min-h-[clamp(18rem,30vw,24rem)] items-center text-center">
-            <div className="w-full">
+        <Panel title="Investment snapshot" action="Settings" onAction={() => {
+          setSettingsTab("connections");
+          setSettingsOpen(true);
+        }}>
+          <div className="space-y-6">
+            <div className="text-center">
               <div className="mb-3 flex justify-center">
-                <Chip tone="green">Up 2.88%</Chip>
+                <Chip tone={holdings.length ? "green" : "blue"}>{holdings.length ? `${holdings.length} holdings` : `${investments.length} accounts`}</Chip>
               </div>
               <p className="text-4xl font-black leading-tight">{usdExact.format(total)}</p>
-              <LineChart className="mt-8 h-[clamp(10rem,20vw,16rem)] w-full" values={rangeSeries(investmentRange, "investment")} color="var(--green)" />
-              <RangeTabs value={investmentRange} onChange={setInvestmentRange} />
+            </div>
+            <div className="grid gap-3 md:grid-cols-3">
+              <Metric label="Accounts" value={investments.length.toString()} tone="green" />
+              <Metric label="Holdings value" value={usdExact.format(holdingsTotal || total)} />
+              <Metric label="Holding accounts" value={accountsWithHoldings ? accountsWithHoldings.toString() : "Pending"} tone={accountsWithHoldings ? "green" : "orange"} />
             </div>
           </div>
         </Panel>
-        <div className="space-y-3">{investments.map((account) => (
-          <div key={account.id} className="compact-panel grid gap-3 p-4 md:grid-cols-[1fr_auto_auto] md:items-center">
-            <div className="font-black">{accountDisplayName(account)}{account.last4 ? <span className="ml-2 text-blue-300/70">{account.last4}</span> : null}</div>
-            <Chip tone={account.change >= 0 ? "green" : "red"}>{account.change >= 0 ? "Up" : "Down"} {Math.abs(account.change)}%</Chip>
-            <div className="font-black">{usdExact.format(account.balance)}</div>
+        <Panel title="Accounts" action={investments.length ? undefined : "Connect"} onAction={connectModal}>
+          {investments.length ? (
+            <div className="space-y-3">{investments.map((account) => {
+              const accountHoldingCount = holdings.filter((holding) => holding.accountId === account.id).length;
+              return (
+                <div key={account.id} className="compact-panel grid gap-3 p-4 md:grid-cols-[1fr_auto_auto] md:items-center">
+                  <div className="min-w-0">
+                    <div className="truncate font-black">{accountDisplayName(account)}{account.last4 ? <span className="ml-2 text-blue-300/70">{account.last4}</span> : null}</div>
+                    <div className="text-sm font-bold text-blue-300/75">{account.subtype || "Investment account"}</div>
+                  </div>
+                  <Chip tone="blue">{accountHoldingCount ? `${accountHoldingCount} holdings` : "Balance only"}</Chip>
+                  <div className="text-right font-black">{usdExact.format(account.balance)}</div>
+                </div>
+              );
+            })}</div>
+          ) : (
+            <div className="rounded-2xl border border-dashed border-[var(--line)] bg-[var(--surface-2)] p-6 text-center">
+              <div className="mx-auto grid h-12 w-12 place-items-center rounded-2xl bg-blue-500/15 text-blue-100"><PiggyBank size={22} /></div>
+              <h3 className="mt-4 text-lg font-black">No investment accounts yet</h3>
+              <div className="mt-5 flex justify-center">
+                <Button variant="secondary" onClick={connectModal}><Landmark size={16} /> Connect account</Button>
+              </div>
+            </div>
+          )}
+        </Panel>
+        <Panel title="Holdings">
+          {holdings.length ? (
+            <div className="space-y-3">{holdings.slice(0, 12).map(renderInvestmentHoldingRow)}</div>
+          ) : (
+            <div className="rounded-2xl border border-dashed border-[var(--line)] bg-[var(--surface-2)] p-6 text-sm font-bold text-[var(--muted)]">
+              Holdings will appear after Plaid sends investment data.
+            </div>
+          )}
+        </Panel>
+      </div>
+    );
+  }
+
+  function renderInvestmentHoldingRow(holding: InvestmentHolding) {
+    const account = accountsById.get(holding.accountId);
+    const ticker = holding.ticker || holding.name.slice(0, 4).toUpperCase();
+    return (
+      <div key={holding.id} className="compact-panel grid gap-3 p-4 md:grid-cols-[minmax(0,1fr)_auto_auto] md:items-center">
+        <div className="flex min-w-0 items-center gap-3">
+          <span className="grid h-10 w-10 shrink-0 place-items-center rounded-2xl bg-[var(--surface-2)] text-xs font-black text-blue-100">{ticker.slice(0, 4)}</span>
+          <div className="min-w-0">
+            <div className="truncate font-black">{holding.name}</div>
+            <div className="text-sm font-bold text-blue-300/75">{account ? accountDisplayName(account) : "Investment account"} {"\u2022"} {quantityFormatter.format(holding.quantity)} shares</div>
           </div>
-        ))}</div>
+        </div>
+        <Chip tone="blue">{holding.type || ticker}</Chip>
+        <div className="text-right font-black">{usdExact.format(holding.value)}</div>
       </div>
     );
   }
@@ -2979,6 +3042,80 @@ function SettingsModal({
   onDeleteRule: (ruleId: string) => void;
   onToggleRule: (ruleId: string) => void;
 }) {
+  const [backups, setBackups] = useState<BackupItem[]>([]);
+  const [backupBusy, setBackupBusy] = useState(false);
+  const [backupMessage, setBackupMessage] = useState("");
+  const latestBackup = backups[0];
+
+  useEffect(() => {
+    if (activeTab === "account") void refreshBackups();
+  }, [activeTab]);
+
+  async function refreshBackups() {
+    try {
+      const response = await fetch("/api/backups", { cache: "no-store" });
+      if (!response.ok) return;
+      const data = (await response.json()) as { backups?: BackupItem[] };
+      setBackups(data.backups || []);
+    } catch {
+      setBackups([]);
+    }
+  }
+
+  async function createLocalBackup() {
+    setBackupBusy(true);
+    setBackupMessage("");
+    try {
+      const response = await fetch("/api/backups", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action: "backup" })
+      });
+      if (!response.ok) throw new Error("Backup failed.");
+      await refreshBackups();
+      setBackupMessage("Backup saved locally.");
+    } catch (error) {
+      setBackupMessage(error instanceof Error ? error.message : "Backup failed.");
+    } finally {
+      setBackupBusy(false);
+    }
+  }
+
+  async function restoreLatestBackup() {
+    if (!latestBackup) {
+      setBackupMessage("No backup is available yet.");
+      return;
+    }
+    if (!window.confirm("Restore the latest local backup? This replaces the current local database.")) return;
+
+    setBackupBusy(true);
+    setBackupMessage("");
+    try {
+      const response = await fetch("/api/backups", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action: "restore-latest" })
+      });
+      if (!response.ok) throw new Error("Restore failed.");
+      const dataResponse = await fetch("/api/app-data", { cache: "no-store" });
+      if (dataResponse.ok) {
+        const restoredState = (await dataResponse.json()) as FinanceState;
+        setState((current) => ({
+          ...restoredState,
+          theme: current.theme,
+          view: current.view,
+          selectedAccountId: current.selectedAccountId
+        }));
+      }
+      await refreshBackups();
+      setBackupMessage("Latest backup restored.");
+    } catch (error) {
+      setBackupMessage(error instanceof Error ? error.message : "Restore failed.");
+    } finally {
+      setBackupBusy(false);
+    }
+  }
+
   const content = {
     general: (
       <div className="space-y-9">
@@ -3007,10 +3144,11 @@ function SettingsModal({
     connections: (
       <SettingsSection title="Connections" action={<button className="flex items-center gap-2 font-black text-blue-300" onClick={onConnect}><Plus size={16} /> New</button>}>
         <div className="space-y-3">
-          <div className="grid gap-3 rounded-2xl border border-[var(--line)] bg-[var(--surface-2)] p-4 text-sm font-bold text-blue-200 md:grid-cols-3">
+          <div className="grid gap-3 rounded-2xl border border-[var(--line)] bg-[var(--surface-2)] p-4 text-sm font-bold text-blue-200 md:grid-cols-4">
             <span>Plaid {plaidStatus?.configured ? "configured" : "not configured"}</span>
             <span>{plaidStatus?.env || "sandbox"}</span>
             <span>{plaidStatus?.transactionCount ?? 0} synced transactions</span>
+            <span>{plaidStatus?.holdingCount ?? 0} holdings</span>
           </div>
           {plaidStatus?.items.length ? plaidStatus.items.map((institution) => (
             <button key={institution.itemId} className="flex w-full items-center justify-between gap-4 rounded-2xl p-2 text-left transition hover:bg-[var(--surface-2)]">
@@ -3102,6 +3240,21 @@ function SettingsModal({
           <SettingsRow title="Export all transactions" description="Download a CSV file of your data">
             <button className="rounded-xl border border-[var(--line)] bg-[var(--surface-2)] px-3 py-2 text-sm font-black"><Download className="inline" size={14} /> Download</button>
           </SettingsRow>
+        </SettingsSection>
+        <SettingsSection title="Local backups">
+          <SettingsRow title="Database backup" description={latestBackup ? `Latest ${formatStatusDate(latestBackup.modifiedAt)}` : "No backups yet"}>
+            <div className="flex flex-wrap justify-start gap-2 md:justify-end">
+              <button className="inline-flex items-center gap-2 rounded-xl border border-[var(--line)] bg-[var(--surface-2)] px-3 py-2 text-sm font-black disabled:opacity-60" disabled={backupBusy} onClick={createLocalBackup}>
+                <Database size={14} /> Backup now
+              </button>
+              <button className="inline-flex items-center gap-2 rounded-xl border border-[var(--line)] bg-[var(--surface-2)] px-3 py-2 text-sm font-black disabled:opacity-60" disabled={backupBusy || !latestBackup} onClick={restoreLatestBackup}>
+                <ArrowDownUp size={14} /> Restore latest
+              </button>
+            </div>
+          </SettingsRow>
+          {backupMessage ? (
+            <div className="rounded-2xl border border-[var(--line)] bg-[var(--surface-2)] px-4 py-3 text-sm font-bold text-blue-200">{backupMessage}</div>
+          ) : null}
         </SettingsSection>
       </div>
     ),

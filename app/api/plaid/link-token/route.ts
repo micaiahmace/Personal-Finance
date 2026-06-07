@@ -10,6 +10,7 @@ export async function POST() {
       user: { client_user_id: "local-user" },
       client_name: "Personal Finance",
       products: [Products.Transactions],
+      optional_products: [Products.Investments],
       transactions: { days_requested: 180 },
       country_codes: [CountryCode.Us],
       language: "en",

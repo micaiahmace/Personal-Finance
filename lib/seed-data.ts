@@ -39,6 +39,7 @@ export const seedState: FinanceState = {
     { id: "income", groupId: "income", name: "Income", icon: "$", budget: 0, order: 1 }
   ],
   accounts: [],
+  investmentHoldings: [],
   transactions: [],
   recurrences: [],
   goals: [],
