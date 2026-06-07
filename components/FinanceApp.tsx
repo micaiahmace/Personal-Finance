@@ -123,6 +123,9 @@ type PlaidStatus = {
     itemId: string;
     institution: string;
     cursorReady: boolean;
+    accountCount: number;
+    investmentAccountCount: number;
+    holdingCount: number;
     updatedAt: string;
   }>;
 };
@@ -884,14 +887,7 @@ export function FinanceApp() {
       throw new Error(exchangeData.error || "Unable to exchange Plaid token.");
     }
 
-    const dataResponse = await fetch("/api/app-data", { cache: "no-store" });
-    const nextData = (await dataResponse.json()) as FinanceState;
-    setState((current) => ({
-      ...nextData,
-      theme: current.theme,
-      view: current.view,
-      selectedAccountId: current.selectedAccountId || nextData.accounts[0]?.id || ""
-    }));
+    await refreshFinanceState();
     clearPendingPlaidExchange();
     setNotice({
       title: exchangeData.sync?.deferred ? "Account connected" : "Account synced",
@@ -902,13 +898,49 @@ export function FinanceApp() {
     void refreshPlaidStatus();
   }
 
-  async function connectModal() {
+  async function syncExistingPlaidItem(itemId: string, institution: string) {
+    const syncResponse = await fetch("/api/plaid/sync", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ itemId })
+    });
+    const syncData = await syncResponse.json().catch(() => ({}));
+    if (!syncResponse.ok) {
+      throw new Error(syncData.error || "Plaid consent was updated, but the follow-up sync did not finish.");
+    }
+
+    await refreshFinanceState();
+    void refreshPlaidStatus();
+
+    const result = syncData.sync?.results?.[0];
+    const holdings = result?.holdings;
+    setNotice({
+      title: holdings?.synced ? "Investment access updated" : "Connection updated",
+      message: holdings?.synced
+        ? `${institution} synced ${holdings.holdingCount || 0} holdings.`
+        : `${institution} was updated. If holdings still do not appear, Plaid may need a few minutes before the Investments product is ready.`
+    });
+  }
+
+  async function refreshFinanceState() {
+    const dataResponse = await fetch("/api/app-data", { cache: "no-store" });
+    const nextData = (await dataResponse.json()) as FinanceState;
+    setState((current) => ({
+      ...nextData,
+      theme: current.theme,
+      view: current.view,
+      selectedAccountId: current.selectedAccountId || nextData.accounts[0]?.id || ""
+    }));
+  }
+
+  async function connectModal(item?: { itemId: string; institution: string }) {
     if (plaidBusy) return;
     setPlaidBusy(true);
+    const updateMode = Boolean(item?.itemId);
 
     try {
       const pendingExchange = loadPendingPlaidExchange();
-      if (pendingExchange) {
+      if (!updateMode && pendingExchange) {
         await exchangePlaidPublicToken(pendingExchange.publicToken, pendingExchange.institution);
         setPlaidBusy(false);
         return;
@@ -916,7 +948,12 @@ export function FinanceApp() {
 
       let linkResponse: Response;
       try {
-        linkResponse = await fetch("/api/plaid/link-token", { method: "POST", cache: "no-store" });
+        linkResponse = await fetch("/api/plaid/link-token", {
+          method: "POST",
+          cache: "no-store",
+          headers: { "content-type": "application/json" },
+          body: updateMode ? JSON.stringify({ itemId: item?.itemId }) : JSON.stringify({})
+        });
       } catch {
         throw new Error("Could not reach the local Plaid setup route. Refresh the app and make sure the dev server is running on port 3000.");
       }
@@ -931,13 +968,17 @@ export function FinanceApp() {
       const handler = window.Plaid.create({
         token: linkData.link_token,
         onSuccess: async (publicToken, metadata) => {
-          savePendingPlaidExchange(publicToken, metadata.institution?.name);
           try {
-            await exchangePlaidPublicToken(publicToken, metadata.institution?.name);
+            if (updateMode && item) {
+              await syncExistingPlaidItem(item.itemId, item.institution);
+            } else {
+              savePendingPlaidExchange(publicToken, metadata.institution?.name);
+              await exchangePlaidPublicToken(publicToken, metadata.institution?.name);
+            }
           } catch (error) {
             setNotice({
-              title: "Plaid sync needs attention",
-              message: error instanceof Error ? error.message : "Plaid connected, but the first sync did not finish. Click Connect again soon to retry without signing in again."
+              title: updateMode ? "Plaid update needs attention" : "Plaid sync needs attention",
+              message: error instanceof Error ? error.message : updateMode ? "Plaid updated, but the follow-up sync did not finish." : "Plaid connected, but the first sync did not finish. Click Connect again soon to retry without signing in again."
             });
           } finally {
             setPlaidBusy(false);
@@ -948,7 +989,7 @@ export function FinanceApp() {
           if (error) {
             setNotice({
               title: "Plaid connection stopped",
-              message: error.display_message || error.error_message || "Plaid exited before the account was connected."
+              message: error.display_message || error.error_message || (updateMode ? "Plaid exited before the connection was updated." : "Plaid exited before the account was connected.")
             });
           }
         }
@@ -1298,7 +1339,7 @@ export function FinanceApp() {
             </nav>
             <div className="flex items-center gap-2">
               <AiStatusPill status={aiStatus} />
-              <Button variant="secondary" onClick={connectModal}><Database size={16} /> {plaidBusy ? "Connecting" : "Connect"}</Button>
+              <Button variant="secondary" onClick={() => connectModal()}><Database size={16} /> {plaidBusy ? "Connecting" : "Connect"}</Button>
               <IconButton label="Toggle theme" onClick={() => setUi({ theme: state.theme === "dark" ? "light" : "dark" })}>
                 {state.theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
               </IconButton>
@@ -1313,11 +1354,13 @@ export function FinanceApp() {
           activeTab={settingsTab}
           state={state}
           plaidStatus={plaidStatus}
+          plaidBusy={plaidBusy}
           categories={allSortedCategories}
           setActiveTab={setSettingsTab}
           setState={setState}
           onClose={() => setSettingsOpen(false)}
-          onConnect={connectModal}
+          onConnect={() => connectModal()}
+          onUpdateConsent={connectModal}
           onApplyRules={applyRules}
           onOpenRule={openRule}
           onDeleteRule={(ruleId) => commit((draft) => {
@@ -1711,7 +1754,7 @@ export function FinanceApp() {
       <div className="fade-in space-y-8">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <h2 className="text-xl font-black">Accounts</h2>
-          <button className="grid h-9 w-9 place-items-center rounded-full text-xl font-black text-blue-300 transition hover:bg-[var(--surface-2)]" onClick={connectModal} aria-label="Connect account">
+          <button className="grid h-9 w-9 place-items-center rounded-full text-xl font-black text-blue-300 transition hover:bg-[var(--surface-2)]" onClick={() => connectModal()} aria-label="Connect account">
             +
           </button>
         </div>
@@ -1819,7 +1862,7 @@ export function FinanceApp() {
               <div className="mx-auto grid h-12 w-12 place-items-center rounded-2xl bg-blue-500/15 text-blue-100"><PiggyBank size={22} /></div>
               <h3 className="mt-4 text-lg font-black">No investment accounts yet</h3>
               <div className="mt-5 flex justify-center">
-                <Button variant="secondary" onClick={connectModal}><Landmark size={16} /> Connect account</Button>
+                <Button variant="secondary" onClick={() => connectModal()}><Landmark size={16} /> Connect account</Button>
               </div>
             </div>
           )}
@@ -1908,7 +1951,7 @@ export function FinanceApp() {
               <h3 className="mt-4 text-xl font-black">No goals yet</h3>
               <div className="mt-5 flex flex-wrap justify-center gap-2">
                 <Button onClick={() => openGoalModal()}><Plus size={16} /> Create goal</Button>
-                <Button variant="secondary" onClick={connectModal}><Landmark size={16} /> Connect account</Button>
+                <Button variant="secondary" onClick={() => connectModal()}><Landmark size={16} /> Connect account</Button>
               </div>
             </div>
           </section>
@@ -3019,11 +3062,13 @@ function SettingsModal({
   activeTab,
   state,
   plaidStatus,
+  plaidBusy,
   categories,
   setActiveTab,
   setState,
   onClose,
   onConnect,
+  onUpdateConsent,
   onApplyRules,
   onOpenRule,
   onDeleteRule,
@@ -3032,11 +3077,13 @@ function SettingsModal({
   activeTab: SettingsTab;
   state: FinanceState;
   plaidStatus: PlaidStatus | null;
+  plaidBusy: boolean;
   categories: BudgetCategory[];
   setActiveTab: (tab: SettingsTab) => void;
   setState: (updater: (current: FinanceState) => FinanceState) => void;
   onClose: () => void;
   onConnect: () => void;
+  onUpdateConsent: (item: { itemId: string; institution: string }) => void;
   onApplyRules: () => void;
   onOpenRule: (rule?: MerchantRule, pattern?: string) => void;
   onDeleteRule: (ruleId: string) => void;
@@ -3151,16 +3198,28 @@ function SettingsModal({
             <span>{plaidStatus?.holdingCount ?? 0} holdings</span>
           </div>
           {plaidStatus?.items.length ? plaidStatus.items.map((institution) => (
-            <button key={institution.itemId} className="flex w-full items-center justify-between gap-4 rounded-2xl p-2 text-left transition hover:bg-[var(--surface-2)]">
+            <div key={institution.itemId} className="flex w-full flex-wrap items-center justify-between gap-4 rounded-2xl p-2">
               <span className="flex min-w-0 items-center gap-3">
                 <span className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-blue-500/25 text-xs font-black text-blue-100">{institution.institution.slice(0, 2).toUpperCase()}</span>
                 <span className="min-w-0">
                   <span className="block truncate font-black">{institution.institution}</span>
-                  <span className="block text-sm font-bold text-blue-300/80">{institution.cursorReady ? "Incremental sync ready" : "Initial sync pending"}</span>
+                  <span className="block text-sm font-bold text-blue-300/80">
+                    {institution.accountCount} accounts {"\u2022"} {institution.investmentAccountCount} investment {"\u2022"} {institution.holdingCount} holdings
+                  </span>
                 </span>
               </span>
-              <span className="shrink-0 text-sm font-bold text-blue-300">{formatStatusDate(institution.updatedAt)} &gt;</span>
-            </button>
+              <span className="flex flex-wrap items-center gap-2">
+                <span className="shrink-0 text-sm font-bold text-blue-300">{formatStatusDate(institution.updatedAt)}</span>
+                <button
+                  type="button"
+                  className="rounded-xl border border-blue-400/30 bg-blue-500/15 px-3 py-2 text-sm font-black text-blue-100 disabled:opacity-60"
+                  disabled={plaidBusy}
+                  onClick={() => onUpdateConsent({ itemId: institution.itemId, institution: institution.institution })}
+                >
+                  Update consent
+                </button>
+              </span>
+            </div>
           )) : (
             <div className="rounded-2xl border border-dashed border-[var(--line)] bg-[var(--surface-2)] p-6 text-sm font-bold text-[var(--muted)]">
               No connected institutions yet.
