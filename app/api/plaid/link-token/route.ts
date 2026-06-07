@@ -16,6 +16,16 @@ export async function POST(request: Request) {
         return NextResponse.json({ error: "Connected Plaid item was not found." }, { status: 404 });
       }
 
+      const investmentAccountCount = await prisma.account.count({
+        where: {
+          plaidItemId: item.itemId,
+          type: "Investment"
+        }
+      });
+      if (investmentAccountCount === 0) {
+        return NextResponse.json({ error: "This connection does not have investment accounts to update." }, { status: 400 });
+      }
+
       const response = await plaid.linkTokenCreate({
         user: { client_user_id: "local-user" },
         client_name: "Personal Finance",

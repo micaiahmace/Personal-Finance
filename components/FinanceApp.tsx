@@ -3210,14 +3210,20 @@ function SettingsModal({
               </span>
               <span className="flex flex-wrap items-center gap-2">
                 <span className="shrink-0 text-sm font-bold text-blue-300">{formatStatusDate(institution.updatedAt)}</span>
-                <button
-                  type="button"
-                  className="rounded-xl border border-blue-400/30 bg-blue-500/15 px-3 py-2 text-sm font-black text-blue-100 disabled:opacity-60"
-                  disabled={plaidBusy}
-                  onClick={() => onUpdateConsent({ itemId: institution.itemId, institution: institution.institution })}
-                >
-                  Update consent
-                </button>
+                {institution.investmentAccountCount > 0 ? (
+                  <button
+                    type="button"
+                    className="rounded-xl border border-blue-400/30 bg-blue-500/15 px-3 py-2 text-sm font-black text-blue-100 disabled:opacity-60"
+                    disabled={plaidBusy}
+                    onClick={() => onUpdateConsent({ itemId: institution.itemId, institution: institution.institution })}
+                  >
+                    Update consent
+                  </button>
+                ) : (
+                  <span className="rounded-xl border border-[var(--line)] bg-[var(--surface-2)] px-3 py-2 text-sm font-black text-[var(--muted)]">
+                    Transactions only
+                  </span>
+                )}
               </span>
             </div>
           )) : (
