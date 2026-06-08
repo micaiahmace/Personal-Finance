@@ -136,7 +136,7 @@ type BackupItem = {
   size: number;
 };
 type PersistHandler = (nextState: FinanceState, currentState: FinanceState) => void | Promise<void>;
-type TransactionPatch = Partial<Pick<Transaction, "categoryId" | "reviewed" | "excluded" | "internal" | "note" | "splits">>;
+type TransactionPatch = Partial<Pick<Transaction, "name" | "merchant" | "amount" | "date" | "accountId" | "categoryId" | "reviewed" | "excluded" | "internal" | "note" | "splits">>;
 type BulkTransactionUpdate = TransactionPatch & { id: string };
 
 type PlaidLinkHandler = {
@@ -1625,21 +1625,25 @@ export function FinanceApp() {
               const excluded = !transaction.excluded;
               commit((draft) => {
                 const target = draft.transactions.find((item) => item.id === transaction.id);
-                if (target) target.excluded = excluded;
-              }, () => patchTransaction(transaction.id, { excluded }));
+                if (target) {
+                  target.excluded = excluded;
+                  target.reviewed = true;
+                }
+              }, () => patchTransaction(transaction.id, { excluded, reviewed: true }));
             }}>X</IconButton>
             <IconButton label="Internal transfer" onClick={() => {
               const internal = !transaction.internal;
-              const excluded = internal ? true : transaction.excluded;
+              const excluded = internal ? true : false;
               const categoryId = internal ? null : defaultCategoryIdForTransaction({ ...transaction, internal: false, excluded });
               commit((draft) => {
                 const target = draft.transactions.find((item) => item.id === transaction.id);
                 if (target) {
                   target.internal = internal;
                   target.categoryId = categoryId;
-                  if (target.internal) target.excluded = true;
+                  target.excluded = excluded;
+                  target.reviewed = true;
                 }
-              }, () => patchTransaction(transaction.id, { internal, excluded, ...(internal ? { categoryId } : {}) }));
+              }, () => patchTransaction(transaction.id, { internal, excluded, categoryId, reviewed: true }));
             }}><ArrowDownUp size={14} /></IconButton>
           </div>
         </div>

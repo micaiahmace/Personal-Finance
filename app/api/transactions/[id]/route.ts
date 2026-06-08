@@ -2,11 +2,16 @@ import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 
 type TransactionPatch = {
+  accountId?: string;
+  amount?: number;
   categoryId?: string | null;
-  reviewed?: boolean;
+  date?: string;
   excluded?: boolean;
   internal?: boolean;
+  merchant?: string;
+  name?: string;
   note?: string | null;
+  reviewed?: boolean;
   splits?: Array<{ categoryId: string; amount: number }>;
 };
 
@@ -49,10 +54,19 @@ export async function DELETE(_request: Request, context: { params: Promise<{ id:
 
 function transactionPatchData(patch: TransactionPatch) {
   return {
+    ...(patch.accountId !== undefined ? { accountId: patch.accountId } : {}),
+    ...(patch.amount !== undefined && Number.isFinite(patch.amount) ? { amount: patch.amount } : {}),
     ...(patch.categoryId !== undefined ? { categoryId: patch.categoryId } : {}),
-    ...(patch.reviewed !== undefined ? { reviewed: patch.reviewed } : {}),
+    ...(patch.date !== undefined ? { date: parseTransactionDate(patch.date) } : {}),
     ...(patch.excluded !== undefined ? { excluded: patch.excluded } : {}),
     ...(patch.internal !== undefined ? { internalTransfer: patch.internal } : {}),
-    ...(patch.note !== undefined ? { note: patch.note } : {})
+    ...(patch.merchant !== undefined ? { merchantName: patch.merchant || null } : {}),
+    ...(patch.name !== undefined ? { name: patch.name } : {}),
+    ...(patch.note !== undefined ? { note: patch.note } : {}),
+    ...(patch.reviewed !== undefined ? { reviewed: patch.reviewed } : {})
   };
+}
+
+function parseTransactionDate(value: string) {
+  return new Date(`${value.slice(0, 10)}T00:00:00`);
 }
