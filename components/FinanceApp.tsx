@@ -1590,13 +1590,18 @@ export function FinanceApp() {
     const selected = selectedTransactionIdSet.has(transaction.id);
     const categoryPillClass = transaction.internal ? "border-blue-400/30 bg-blue-500/15 text-blue-100" : categoryTone(category);
     return (
-      <div key={transaction.id} className={`transaction-row group grid grid-cols-[22px_minmax(0,1fr)_auto_auto] items-center gap-3 border-b border-[var(--line)] px-4 py-2.5 last:border-b-0 hover:bg-[var(--surface-2)] ${selected ? "bg-blue-500/18" : ""}`}>
+      <div key={transaction.id} className={`transaction-row group grid grid-cols-[22px_10px_minmax(0,1fr)_auto_auto] items-center gap-3 border-b border-[var(--line)] px-4 py-2.5 last:border-b-0 hover:bg-[var(--surface-2)] ${selected ? "bg-blue-500/18" : ""}`}>
         <input
           aria-label={`Select ${transaction.name}`}
           type="checkbox"
           className="h-3.5 w-3.5 rounded border-[var(--line)] bg-transparent"
           checked={selected}
           onChange={() => toggleTransactionSelection(transaction.id)}
+        />
+        <span
+          aria-label={transaction.reviewed ? undefined : "Needs review"}
+          className={`h-2.5 w-2.5 rounded-full transition ${transaction.reviewed ? "opacity-0" : "bg-blue-400 shadow-[0_0_0_3px_rgba(59,130,246,0.16)]"}`}
+          title={transaction.reviewed ? undefined : "Needs review"}
         />
         <button className="min-w-0 text-left" onClick={() => editTransactionCategory(transaction)}>
           <span className="transaction-name">{transaction.name}</span>
