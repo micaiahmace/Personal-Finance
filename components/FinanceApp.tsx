@@ -637,6 +637,41 @@ export function FinanceApp() {
       .catch(() => setAiStatus({ ok: false, label: "AI offline" }));
 
     void refreshPlaidStatus();
+    void syncPlaidOnOpen();
+
+    async function syncPlaidOnOpen() {
+      try {
+        const response = await fetch("/api/plaid/sync", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({})
+        });
+        if (!response.ok || !alive) return;
+
+        const dataResponse = await fetch("/api/app-data", { cache: "no-store" });
+        const nextData = (await dataResponse.json()) as FinanceState;
+        if (!alive) return;
+
+        setState((current) => ({
+          ...nextData,
+          theme: current.theme,
+          view: current.view,
+          selectedAccountId: current.selectedAccountId || nextData.accounts[0]?.id || ""
+        }));
+      } catch {
+        // Startup should never get stuck just because Plaid is temporarily unavailable.
+      } finally {
+        if (!alive) return;
+
+        try {
+          const statusResponse = await fetch("/api/plaid/status", { cache: "no-store" });
+          if (!statusResponse.ok || !alive) return;
+          setPlaidStatus((await statusResponse.json()) as PlaidStatus);
+        } catch {
+          if (alive) setPlaidStatus(null);
+        }
+      }
+    }
 
     return () => {
       alive = false;
